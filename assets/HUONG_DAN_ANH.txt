@@ -1,0 +1,28 @@
+# CẤU TRÚC QUẢN LÝ ẢNH MẪU THEO TỪNG BƯỚC
+
+D:\ToolPT\assets\
+│
+├── B1_QuangCan\
+│   └── nut_quang_can.png                    # Nút Quăng Cần (Phao câu)
+│
+├── B2_DangCau\
+│   ├── nut_giat_can.png                     # Nút Giật Cần (Móc câu / Cá)
+│   │
+│   ├── dau_cham_than\                       # Chứa 18 biến thể màu & góc chụp của DẤU CHẤM THAN
+│   │   ├── chamthan_hong.png
+│   │   ├── chamthan_vang.png
+│   │   ├── hongdam.png, hongdam2.png
+│   │   ├── mautimnhat.png, mautimnhat2.png
+│   │   ├── mauvangdam.png, mauvangdam2.png
+│   │   ├── xanhla.png, xanhnhat.png, cothelamauxanhla.png
+│   │   ├── maucamnhat.png, mauhonghoidam.png
+│   │   ├── mautrang.png, mautrang2.png
+│   │   └── khongbietmaugi.png, khongbietmau2.png
+│   │
+│   └── vat_neo_ten\                         # Chứa Tên & Bảng Danh Hiệu để bot bám đỉnh đầu
+│       ├── columbinaa.png
+│       ├── mumyua.png
+│       └── badge_ngoikhonganluong.png
+│
+└── B3_BaoQuan\
+    └── nut_bao_quan.png                     # Nút Bảo Quản (Cất cá vào túi)

@@ -1,0 +1,38 @@
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyInstaller / Build outputs
+build/
+dist/
+*.spec
+
+# Local diagnostics, session recordings & logs
+diagnostics/
+*.log
+*.tmp
+temp/
+scratch/
+
+# Environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDE & Editor configs
+.vscode/
+.idea/
+
+# Archive files
+*.zip
+*.tar.gz
+*.rar
+*.7z
+
+# Temporary scratch screenshots
+crop*.png
+test_*.png
+head_roi_test.png
+region_matched.png

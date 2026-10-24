@@ -12,9 +12,9 @@
     "b4_ok_btn": "assets/B4_SuaCan/btn_ok"
   },
   "thresholds": {
-    "b1_quang_can": 0.70,
+    "b1_quang_can": 0.7,
     "b2_giat_can": 0.7,
-    "b2_cham_than": 0.85,
+    "b2_cham_than": 0.72,
     "b2_vat_neo": 0.7,
     "b3_bao_quan": 0.7,
     "b2_ten_nhan_vat": 0.55,
@@ -37,5 +37,9 @@
   "hotkeys": {
     "start": "f1",
     "stop": "f2"
+  },
+  "telemetry": {
+    "enabled": true,
+    "jsonl_path": "telemetry/telemetry.jsonl"
   }
 }

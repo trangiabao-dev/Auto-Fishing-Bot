@@ -64,6 +64,12 @@ class BotEngine:
         self._last_img1_match: Optional[MatchResult] = None
         self._last_good_head_roi: Optional[Tuple[int, int, int, int]] = None  # only ever set from a real name match
 
+        # P0: telemetry tuy chon, chi quan sat, khong doi hanh vi
+        tel_cfg = config.get("telemetry", {})
+        if tel_cfg.get("enabled", False):
+            from core.instrumentation import attach_telemetry
+            attach_telemetry(self, jsonl_path=tel_cfg.get("jsonl_path", "telemetry/telemetry.jsonl"))
+
     @staticmethod
     def _clamp_region(region, frame, offset):
         """Keeps a capture region inside the captured monitor so mss never gets an off-screen box."""
@@ -539,22 +545,11 @@ class BotEngine:
                         continue
 
                     frame, offset = self.capturer.capture(effective_region)
-                    # Grace period: trong 2.5s đầu sau khi quăng cần, cần vung / phao bay và cá chưa thể cắn.
-                    # Bỏ qua kiểm tra '!' trong 2.5s đầu để triệt tiêu hoàn toàn false-positive.
-                    if (now - start_wait_time) >= 2.5:
-                        # Cổng vị trí trục dọc: '!' thật luôn xuất hiện ngay trên đỉnh đầu nhân vật (dải giữa ROI)
-                        fh2, fw2 = frame.shape[:2]
-                        sx0, sx1 = int(fw2 * 0.22), int(fw2 * 0.78)
-                        match2 = self.matcher.match_any(
-                            frame[:, sx0:sx1],
-                            img2_path,
-                            threshold=thresh2,
-                            screen_offset=(offset[0] + sx0, offset[1]),
-                            multi_scale=False
-                        )
-                        # Kiểm tra độ lệch khỏi trục giữa đầu nhân vật: nếu lệch > 12% bề ngang ROI thì loại bỏ (chỉ là nhiễu nền)
-                        if match2.found and abs((match2.x + match2.w / 2.0) - (offset[0] + fw2 / 2.0)) > 0.12 * fw2:
-                            match2 = MatchResult(found=False, confidence=match2.confidence, template_name=match2.template_name)
+                    # Grace period: trong 2.0s đầu sau khi quăng cần, cần chưa xuống nước và cá chưa thể cắn.
+                    # Bỏ qua kiểm tra '!' trong 2.0s đầu để triệt tiêu hoàn toàn false-positive (màu áo/nón/cần).
+                    if (now - start_wait_time) >= 2.0:
+                        # Quét siêu nhanh ở tỷ lệ gốc 1.0x (chỉ mất ~20ms) để không bỏ lỡ khoảnh khắc cá cắn 0.5s
+                        match2 = self.matcher.match_any(frame, img2_path, threshold=thresh2, screen_offset=offset, multi_scale=False)
                     else:
                         match2 = MatchResult(found=False)
 

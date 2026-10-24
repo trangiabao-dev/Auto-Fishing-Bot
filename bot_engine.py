@@ -10,6 +10,7 @@ from core.detector import TemplateMatcher, MatchResult
 from core.input_sim import InputSimulator
 from core.diagnostics import StageTwoRecorder
 from core.head_locator import NameLocator
+from core.plate_locator import PlateLocator, PlateTracker
 
 
 class BotState(Enum):
@@ -55,10 +56,12 @@ class BotEngine:
         self.stats = {"bite_seen": 0, "caught": 0, "missed_after_click": 0, "lost_before_bite": 0}
         self.recorder = StageTwoRecorder()  # Step 0: evidence for bite-detection debugging
 
-        # Character locator: colour-mask of the neon-green name text (robust to day/night/rain)
+        # Character locator: PlateLocator + PlateTracker (P1a: blob-based, hue-mask, adaptive zoom)
         name_tpl = config.get("templates", {}).get("b2_ten_nhan_vat", "assets/B2_DangCau/vat_neo_ten")
         name_thresh = config.get("thresholds", {}).get("b2_ten_nhan_vat", 0.60)
-        self.name_locator = NameLocator(name_tpl, min_score=name_thresh)
+        self.plate_locator = PlateLocator(name_tpl, min_score=name_thresh)
+        self.plate_tracker = PlateTracker(self.plate_locator)
+        self.name_locator = self.plate_locator  # backward compatibility / telemetry fallback
 
         # Cached last known match for img1 and head ROI
         self._last_img1_match: Optional[MatchResult] = None
@@ -372,6 +375,7 @@ class BotEngine:
             # STAGE 1: Tìm nút Quăng Cần và Click (Fast Path)
             # ========================================================
             if self.state == BotState.STAGE_1:
+                self.plate_tracker.reset()
                 self._log(f"[{self.state.value}] Đang quét tìm nút Quăng Cần...")
                 img1_path = templates.get("b1_quang_can") or templates.get("img1")
                 thresh1 = thresholds.get("b1_quang_can") or thresholds.get("img1", 0.70)
@@ -487,13 +491,16 @@ class BotEngine:
                         last_locate_time = now
                         full_frame, full_offset = self.capturer.capture(None)
 
-                        # 1. Định vị nhân vật
-                        loc = self.name_locator.locate(full_frame, full_offset)
+                        # 1. Định vị nhân vật qua PlateTracker (P1a: hue-mask, blob-based, windowed)
+                        track_res = self.plate_tracker.update(full_frame, full_offset)
+                        if track_res.ambiguous:
+                            self._log(" -> [CẢNH BÁO] Phát hiện nhiều người chơi có tên màu xanh tương tự. Giữ nguyên mục tiêu hiện tại.")
+                        loc = track_res.hit
                         if loc is not None:
                             new_roi = self._clamp_region(loc.head_roi(), full_frame, full_offset)
                             moved = effective_region is None or abs(new_roi[0] - effective_region[0]) > 20 or abs(new_roi[1] - effective_region[1]) > 20
                             if moved:
-                                self._log(f" -> Định vị nhân vật '{loc.name}' (độ khớp {loc.score:.2f}): vùng đầu = {new_roi}")
+                                self._log(f" -> Định vị nhân vật '{loc.name}' (độ khớp {loc.score:.2f}, scale {loc.scale:.2f}): vùng đầu = {new_roi}")
                             effective_region = self._last_good_head_roi = new_roi
 
                         # 2. Định vị nút Giật Cần trong vùng thao tác (góc dưới bên phải)

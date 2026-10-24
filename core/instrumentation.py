@@ -152,6 +152,7 @@ def attach_telemetry(
     hook("matcher", "match", _match_namer("match", "template_path"), score=True)
     hook("matcher", "match_any", _match_namer("match_any", "template_target"), score=True)
     hook("name_locator", "locate", _fixed("locate"))
+    hook("plate_tracker", "update", _fixed("locate"))
     hook("recorder", "record", _fixed("record"))
     hook("recorder", "record_full", _fixed("record_full"))
     hook("recorder", "dump", _fixed("dump"))

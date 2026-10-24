@@ -169,3 +169,30 @@ Claude mới tiếp nhận codebase nên triển khai theo 3 bước sau:
    * Tuyệt đối không chụp Full HD mỗi 0.5s trong lúc đang chờ cá cắn.
 4. **Tích hợp [`BiteDetector`](file:///D:/GitHub%20Desktop/GitHub/Auto-Fishing-Bot/core/bite_detector.py) (Giải pháp triệt để dài hạn):**
    * Sử dụng thuật toán so lệch khung hình theo thời gian (Temporal Differencing) để phát hiện sự xuất hiện đột ngột của hình dáng viên thuốc `!`. Thuật toán này miễn nhiễm hoàn toàn với bọt nước thác nước, màu tóc, màu nón và mọi thời tiết ngày/đêm.
+
+---
+
+## 6. DỮ LIỆU THỰC NGHIỆM MỚI NHẤT (TEST 5 BỐI CẢNH & GÓC NHÌN CAMERA)
+
+Dưới đây là kết quả kiểm thử thực tế trên bản gốc hôm qua (threshold 0.72) ở 3 góc nhìn camera khác nhau:
+
+### 6.1. Bối cảnh Thác Nước (Bọt nước trắng + Cần câu vàng phản chiếu)
+* **Hiện tượng:** Bot bị giật non / hụt cá liên tục. Tỉ lệ dính chỉ đạt **25% - 30%** (Thấy 28 lần nhưng giật hụt 17 lần!).
+* **Bằng chứng Log:**
+  - Vừa quăng cần 1s - 2s: PHÁT HIỆN DẤU CHẤM THAN TRÊN ĐẦU! (Độ khớp: 0.74 - 0.76 [chamthan_vang.png]).
+  - Giật cần ngay lập tức: ⚠️ [ĐỨT DÂY / HỤT CÁ] Phát hiện nút Quăng Cần (0.80) đã mở lại!.
+  - **Nguyên nhân:** False Positive từ bọt nước trắng và ánh vàng của cần câu đè lên vùng tìm kiếm dấu '!'.
+
+### 6.2. Góc nhìn ngang bên trái/phải (Side View)
+* **Hiện tượng:** Tỉ lệ câu thành công khá tốt (ví dụ khớp cothelamauxanhla.png 0.98 ở Hình 3 và bắt được cá).
+* **Vấn đề tồn đọng:** Thỉnh thoảng vẫn trễ nhịp hoặc không giật cần do vòng quét bị đóng băng (stutter 585ms - 751ms), vượt quá thời gian tồn tại 400ms của dấu '!'.
+
+### 6.3. Góc nhìn từ trên cao nhìn xuống (Top-down View)
+* **Hiện tượng:** Tỉ lệ hụt cực cao, nhiều lần cá cắn nhưng bot hoàn toàn không giật cần.
+* **Bằng chứng Log:**
+  - Vòng quét bị đứng nghiêm trọng: 1259ms - 1406ms!
+  - Mất dấu nút giật cần: [CẢNH BÁO] Không tìm thấy nút giật cần!.
+  - Tỉ lệ dính cá tụt dốc xuống **30% - 33%**.
+* **Nguyên nhân hình học:** Khi nhìn từ trên cao chúc xuống:
+  1. Phối cảnh làm bảng tên và đỉnh đầu co ngắn lại (perspective foreshortening), công thức cứng y - 180 bị lệch khỏi đỉnh đầu thật.
+  2. Dấu '!' bị biến dạng góc nhìn 3D khiến template phẳng không đạt ngưỡng.

@@ -26,12 +26,20 @@ class AutoFishingApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("Auto Fishing Bot - Play Together [Pro Edition]")
-        self.root.geometry("620x720")
-        self.root.minsize(540, 560)
+        
+        # Dimensions: compact by default, fits comfortably on 1080p without blocking game action
+        self.expanded_w = 460
+        self.expanded_h = 410
+        self.mini_h = 145
+        self.is_mini = False
+        
+        self.root.geometry(f"{self.expanded_w}x{self.expanded_h}")
+        self.root.minsize(380, self.mini_h)
         self.root.configure(bg="#181825")
 
-        # Window and option states
+        # Window options
         self.is_topmost = tk.BooleanVar(value=True)
+        self.is_transparent = tk.BooleanVar(value=False)
         self.auto_clear_simple = tk.BooleanVar(value=False)
         self.auto_clear_debug = tk.BooleanVar(value=True)
         self.root.attributes("-topmost", True)
@@ -55,7 +63,7 @@ class AutoFishingApp:
         self.hotkey_mgr = HotkeyManager()
         self._setup_hotkeys()
 
-        # Build Modern UI
+        # Build Compact Modern UI
         self._build_ui()
 
         # Schedule auto-clear log timer (every 60s)
@@ -77,101 +85,111 @@ class AutoFishingApp:
         self.hotkey_mgr.register("f3", self.engine.recorder.request_dump)
 
     def _build_ui(self):
-        # 1. Header Frame with Modern Styling
-        header = tk.Frame(self.root, bg="#181825", pady=10)
-        header.pack(fill="x", padx=15)
-
-        title_box = tk.Frame(header, bg="#181825")
-        title_box.pack(fill="x")
+        # 1. Compact Header Frame: Title + Badge + Fish Counter in 1 line
+        header = tk.Frame(self.root, bg="#181825")
+        header.pack(fill="x", padx=10, pady=(6, 2))
 
         title_lbl = tk.Label(
-            title_box,
+            header,
             text="🎣 AUTO FISHING BOT",
-            font=("Segoe UI", 16, "bold"),
+            font=("Segoe UI", 12, "bold"),
             fg="#8aadf4",
             bg="#181825"
         )
         title_lbl.pack(side="left")
 
         ver_pill = tk.Label(
-            title_box,
+            header,
             text="PRO v2.5",
             font=("Segoe UI", 8, "bold"),
             bg="#313244",
             fg="#a6da95",
-            padx=7,
-            pady=2
+            padx=5,
+            pady=1
         )
-        ver_pill.pack(side="left", padx=10)
+        ver_pill.pack(side="left", padx=6)
 
-        sub_lbl = tk.Label(
+        self.counter_lbl = tk.Label(
             header,
-            text="Vòng Lặp Khép Kín • Tự Phục Hồi Lệch Bước • Chống Giật Nhầm • Khóa Tọa Độ",
-            font=("Segoe UI", 8),
-            fg="#a5adcb",
-            bg="#181825"
+            text="🐟 0 con",
+            font=("Segoe UI", 9, "bold"),
+            fg="#a6da95",
+            bg="#1e1e2e",
+            padx=8,
+            pady=1,
+            highlightbackground="#313244",
+            highlightthickness=1
         )
-        sub_lbl.pack(anchor="w", pady=(3, 0))
-
-        # 2. Modern Status & Counter Card
-        card = tk.Frame(self.root, bg="#1e1e2e", padx=15, pady=12, highlightbackground="#313244", highlightthickness=1)
-        card.pack(fill="x", padx=15, pady=5)
-
-        status_box = tk.Frame(card, bg="#1e1e2e")
-        status_box.pack(fill="x")
-
-        tk.Label(status_box, text="Trạng thái:", font=("Segoe UI", 10, "bold"), fg="#cad3f5", bg="#1e1e2e").pack(side="left")
-        self.status_lbl = tk.Label(status_box, text="🔴 ĐÃ DỪNG (Sẵn sàng)", font=("Segoe UI", 10, "bold"), fg="#ed8796", bg="#1e1e2e")
-        self.status_lbl.pack(side="left", padx=10)
-
-        self.counter_lbl = tk.Label(status_box, text="🐟 Đã câu: 0 con", font=("Segoe UI", 10, "bold"), fg="#a6da95", bg="#1e1e2e")
         self.counter_lbl.pack(side="right")
 
-        # 3. Big Modern Control Buttons
-        btn_frame = tk.Frame(self.root, bg="#181825", pady=8)
-        btn_frame.pack(fill="x", padx=15)
+        # 2. Status & Live Ticker Card (Compact Row)
+        card = tk.Frame(self.root, bg="#1e1e2e", padx=10, pady=4, highlightbackground="#313244", highlightthickness=1)
+        card.pack(fill="x", padx=10, pady=(2, 4))
+
+        self.status_lbl = tk.Label(
+            card,
+            text="🔴 ĐÃ DỪNG (Nhấn F1)",
+            font=("Segoe UI", 9, "bold"),
+            fg="#ed8796",
+            bg="#1e1e2e"
+        )
+        self.status_lbl.pack(side="left")
+
+        self.ticker_lbl = tk.Label(
+            card,
+            text="Sẵn sàng bắt đầu",
+            font=("Segoe UI", 8),
+            fg="#a5adcb",
+            bg="#1e1e2e",
+            anchor="e"
+        )
+        self.ticker_lbl.pack(side="right", fill="x", expand=True)
+
+        # 3. Compact Control Buttons (F1 / F2)
+        btn_frame = tk.Frame(self.root, bg="#181825")
+        btn_frame.pack(fill="x", padx=10, pady=2)
 
         self.btn_start = tk.Button(
             btn_frame,
             text="▶ BẮT ĐẦU (F1)",
-            font=("Segoe UI", 11, "bold"),
+            font=("Segoe UI", 10, "bold"),
             bg="#a6da95",
             fg="#181825",
             activebackground="#8bd57e",
             activeforeground="#181825",
             relief="flat",
             cursor="hand2",
-            padx=15,
-            pady=8,
+            padx=8,
+            pady=4,
             command=self.start_bot
         )
-        self.btn_start.pack(side="left", expand=True, fill="x", padx=(0, 6))
+        self.btn_start.pack(side="left", expand=True, fill="x", padx=(0, 4))
 
         self.btn_stop = tk.Button(
             btn_frame,
             text="⏹ DỪNG LẠI (F2)",
-            font=("Segoe UI", 11, "bold"),
+            font=("Segoe UI", 10, "bold"),
             bg="#ed8796",
             fg="#181825",
             activebackground="#e0697a",
             activeforeground="#181825",
             relief="flat",
             cursor="hand2",
-            padx=15,
-            pady=8,
+            padx=8,
+            pady=4,
             command=self.stop_bot
         )
-        self.btn_stop.pack(side="left", expand=True, fill="x", padx=(6, 0))
+        self.btn_stop.pack(side="left", expand=True, fill="x", padx=(4, 0))
 
-        # 4. Top Quick Options Bar
+        # 4. Quick Options Bar: Topmost, Transparency, Mini Mode Toggle, Vision Test
         opts_bar = tk.Frame(self.root, bg="#181825")
-        opts_bar.pack(fill="x", padx=15, pady=(0, 4))
+        opts_bar.pack(fill="x", padx=10, pady=(2, 4))
 
         top_check = tk.Checkbutton(
             opts_bar,
-            text="📌 Luôn nổi (Top)",
+            text="📌 Top",
             variable=self.is_topmost,
-            font=("Segoe UI", 9),
+            font=("Segoe UI", 8),
             fg="#cad3f5",
             bg="#181825",
             activebackground="#181825",
@@ -181,38 +199,71 @@ class AutoFishingApp:
         )
         top_check.pack(side="left")
 
-        test_btn = tk.Button(
+        trans_check = tk.Checkbutton(
             opts_bar,
-            text="📸 Soi Mắt Bot",
+            text="🌓 Mờ nhẹ",
+            variable=self.is_transparent,
+            font=("Segoe UI", 8),
+            fg="#cad3f5",
+            bg="#181825",
+            activebackground="#181825",
+            activeforeground="#cad3f5",
+            selectcolor="#1e1e2e",
+            command=self._toggle_transparency
+        )
+        trans_check.pack(side="left", padx=4)
+
+        # Mini Mode Toggle button (crucial for game visibility)
+        self.toggle_mini_btn = tk.Button(
+            opts_bar,
+            text="🗕 Thu Gọn",
             font=("Segoe UI", 8, "bold"),
             bg="#8aadf4",
             fg="#181825",
             activebackground="#7dc4e4",
             relief="flat",
             cursor="hand2",
-            padx=10,
-            pady=2,
+            padx=8,
+            pady=1,
+            command=self._toggle_mini_mode
+        )
+        self.toggle_mini_btn.pack(side="right")
+
+        test_btn = tk.Button(
+            opts_bar,
+            text="📸 Soi Mắt",
+            font=("Segoe UI", 8),
+            bg="#313244",
+            fg="#cad3f5",
+            activebackground="#45475a",
+            relief="flat",
+            cursor="hand2",
+            padx=6,
+            pady=1,
             command=self._test_bot_vision
         )
-        test_btn.pack(side="right")
+        test_btn.pack(side="right", padx=4)
 
-        # 5. Segmented Notebook Tabs (Trạng Thái Rút Gọn vs Log Chi Tiết Debug)
+        # 5. Notebook Container (Can be collapsed in Mini Mode)
+        self.notebook_frame = tk.Frame(self.root, bg="#181825")
+        self.notebook_frame.pack(fill="both", expand=True, padx=10, pady=(0, 6))
+
         style = ttk.Style()
         style.theme_use('clam')
         style.configure('Custom.TNotebook', background='#181825', borderwidth=0)
-        style.configure('Custom.TNotebook.Tab', background='#1e1e2e', foreground='#cad3f5', padding=[14, 7], font=('Segoe UI', 9, 'bold'), borderwidth=0)
+        style.configure('Custom.TNotebook.Tab', background='#1e1e2e', foreground='#cad3f5', padding=[10, 4], font=('Segoe UI', 8, 'bold'), borderwidth=0)
         style.map('Custom.TNotebook.Tab',
                   background=[('selected', '#313244'), ('active', '#24273a')],
                   foreground=[('selected', '#8aadf4'), ('active', '#b4befe')])
 
-        self.notebook = ttk.Notebook(self.root, style='Custom.TNotebook')
-        self.notebook.pack(fill='both', expand=True, padx=15, pady=5)
+        self.notebook = ttk.Notebook(self.notebook_frame, style='Custom.TNotebook')
+        self.notebook.pack(fill='both', expand=True)
 
         # Tab 1: Trạng Thái Rút Gọn
         self.tab_simple = tk.Frame(self.notebook, bg="#181825")
-        self.notebook.add(self.tab_simple, text="📋 Trạng Thái Bot (Rút Gọn)")
+        self.notebook.add(self.tab_simple, text="📋 Rút Gọn")
 
-        t1_toolbar = tk.Frame(self.tab_simple, bg="#181825", pady=4)
+        t1_toolbar = tk.Frame(self.tab_simple, bg="#181825", pady=2)
         t1_toolbar.pack(fill="x")
 
         tk.Checkbutton(
@@ -235,7 +286,7 @@ class AutoFishingApp:
             activebackground="#45475a",
             relief="flat",
             cursor="hand2",
-            padx=8,
+            padx=6,
             pady=1,
             command=self._clear_simple_log
         ).pack(side="right")
@@ -245,32 +296,32 @@ class AutoFishingApp:
             bg="#1e1e2e",
             fg="#cdd6f4",
             insertbackground="#cdd6f4",
-            font=("Segoe UI", 9),
+            font=("Segoe UI", 8),
             wrap="word",
             relief="flat",
             bd=0,
-            padx=8,
-            pady=8
+            padx=6,
+            pady=4
         )
         self.simple_text.pack(fill="both", expand=True)
 
-        # Tags styling for Tab 1
-        self.simple_text.tag_config("ROUND_COMPLETE", foreground="#a6da95", font=("Segoe UI", 9, "bold"))
-        self.simple_text.tag_config("STEP_CAST", foreground="#89b4fa", font=("Segoe UI", 9, "bold"))
-        self.simple_text.tag_config("STEP_WAIT", foreground="#f9e2af", font=("Segoe UI", 9))
-        self.simple_text.tag_config("STEP_BITE", foreground="#f38ba8", font=("Segoe UI", 10, "bold"))
-        self.simple_text.tag_config("STEP_KEEP", foreground="#a6e3a1", font=("Segoe UI", 9, "bold"))
-        self.simple_text.tag_config("STEP_REPAIR", foreground="#cba6f7", font=("Segoe UI", 9, "bold"))
-        self.simple_text.tag_config("STEP_ADJUST", foreground="#89dceb", font=("Segoe UI", 9, "italic"))
-        self.simple_text.tag_config("STEP_WARN", foreground="#fab387", font=("Segoe UI", 9))
-        self.simple_text.tag_config("STEP_INFO", foreground="#cad3f5", font=("Segoe UI", 9))
-        self.simple_text.tag_config("SEPARATOR", foreground="#fab387", font=("Segoe UI", 9, "bold"))
+        # Styling tags for Tab 1
+        self.simple_text.tag_config("ROUND_COMPLETE", foreground="#a6da95", font=("Segoe UI", 8, "bold"))
+        self.simple_text.tag_config("STEP_CAST", foreground="#89b4fa", font=("Segoe UI", 8, "bold"))
+        self.simple_text.tag_config("STEP_WAIT", foreground="#f9e2af", font=("Segoe UI", 8))
+        self.simple_text.tag_config("STEP_BITE", foreground="#f38ba8", font=("Segoe UI", 9, "bold"))
+        self.simple_text.tag_config("STEP_KEEP", foreground="#a6e3a1", font=("Segoe UI", 8, "bold"))
+        self.simple_text.tag_config("STEP_REPAIR", foreground="#cba6f7", font=("Segoe UI", 8, "bold"))
+        self.simple_text.tag_config("STEP_ADJUST", foreground="#89dceb", font=("Segoe UI", 8, "italic"))
+        self.simple_text.tag_config("STEP_WARN", foreground="#fab387", font=("Segoe UI", 8))
+        self.simple_text.tag_config("STEP_INFO", foreground="#cad3f5", font=("Segoe UI", 8))
+        self.simple_text.tag_config("SEPARATOR", foreground="#fab387", font=("Segoe UI", 8, "bold"))
 
         # Tab 2: Log Chi Tiết (Debug)
         self.tab_debug = tk.Frame(self.notebook, bg="#181825")
-        self.notebook.add(self.tab_debug, text="🛠 Log Chi Tiết (Debug)")
+        self.notebook.add(self.tab_debug, text="🛠 Chi Tiết (Debug)")
 
-        t2_toolbar = tk.Frame(self.tab_debug, bg="#181825", pady=4)
+        t2_toolbar = tk.Frame(self.tab_debug, bg="#181825", pady=2)
         t2_toolbar.pack(fill="x")
 
         tk.Checkbutton(
@@ -285,7 +336,7 @@ class AutoFishingApp:
         ).pack(side="left")
 
         self.copy_status_lbl = tk.Label(t2_toolbar, text="", font=("Segoe UI", 8, "bold"), fg="#a6da95", bg="#181825")
-        self.copy_status_lbl.pack(side="left", padx=10)
+        self.copy_status_lbl.pack(side="left", padx=6)
 
         tk.Button(
             t2_toolbar,
@@ -296,10 +347,10 @@ class AutoFishingApp:
             activebackground="#7dc4e4",
             relief="flat",
             cursor="hand2",
-            padx=10,
+            padx=8,
             pady=1,
             command=self._copy_debug_log
-        ).pack(side="right", padx=(5, 0))
+        ).pack(side="right", padx=(4, 0))
 
         tk.Button(
             t2_toolbar,
@@ -310,7 +361,7 @@ class AutoFishingApp:
             activebackground="#45475a",
             relief="flat",
             cursor="hand2",
-            padx=8,
+            padx=6,
             pady=1,
             command=self._clear_debug_log
         ).pack(side="right")
@@ -320,28 +371,47 @@ class AutoFishingApp:
             bg="#1e1e2e",
             fg="#cdd6f4",
             insertbackground="#cdd6f4",
-            font=("Consolas", 9),
+            font=("Consolas", 8),
             wrap="word",
             relief="flat",
             bd=0,
             padx=6,
-            pady=6
+            pady=4
         )
         self.debug_text.pack(fill="both", expand=True)
 
-        # Tags styling for Tab 2
+        # Styling tags for Tab 2
         self.debug_text.tag_config("SUCCESS", foreground="#a6da95")
         self.debug_text.tag_config("WARN", foreground="#f9e2af")
         self.debug_text.tag_config("ALERT", foreground="#ed8796")
         self.debug_text.tag_config("INFO", foreground="#89b4fa")
         self.debug_text.tag_config("STATS", foreground="#cba6f7")
 
-        # Initial Welcome Logs
+        # Initial logs
         self.on_engine_log("✨ Ứng dụng đã sẵn sàng! Bấm [F1] để bắt đầu, [F2] để dừng.")
         self.on_engine_log("🎯 [BƯỚC 0 CHẨN ĐOÁN] Thấy dấu '!' trên đầu hãy bấm [F3] để lưu clip.")
 
     def _toggle_topmost(self):
         self.root.attributes("-topmost", self.is_topmost.get())
+
+    def _toggle_transparency(self):
+        alpha = 0.88 if self.is_transparent.get() else 1.0
+        self.root.attributes("-alpha", alpha)
+
+    def _toggle_mini_mode(self):
+        """Collapses or expands the entire log notebook to free screen space during fishing."""
+        if not self.is_mini:
+            # Switch to Mini Mode
+            self.notebook_frame.pack_forget()
+            self.root.geometry(f"{self.expanded_w}x{self.mini_h}")
+            self.toggle_mini_btn.config(text="🗖 Mở Rộng", bg="#a6da95")
+            self.is_mini = True
+        else:
+            # Switch to Full Mode
+            self.notebook_frame.pack(fill="both", expand=True, padx=10, pady=(0, 6))
+            self.root.geometry(f"{self.expanded_w}x{self.expanded_h}")
+            self.toggle_mini_btn.config(text="🗕 Thu Gọn", bg="#8aadf4")
+            self.is_mini = False
 
     def _copy_debug_log(self):
         content = self.debug_text.get("1.0", tk.END).strip()
@@ -349,10 +419,10 @@ class AutoFishingApp:
             self.root.clipboard_clear()
             self.root.clipboard_append(content)
             self.root.update()
-            self.copy_status_lbl.config(text="✅ Đã copy vào Clipboard!")
+            self.copy_status_lbl.config(text="✅ Đã copy!")
             self.root.after(2500, lambda: self.copy_status_lbl.config(text=""))
         else:
-            self.copy_status_lbl.config(text="⚠️ Log trống!")
+            self.copy_status_lbl.config(text="⚠️ Trống!")
             self.root.after(2000, lambda: self.copy_status_lbl.config(text=""))
 
     def _clear_simple_log(self):
@@ -420,19 +490,24 @@ class AutoFishingApp:
         self.root.after(0, self._update_fish_count)
 
     def _update_fish_count(self):
-        self.counter_lbl.config(text=f"🐟 Đã câu: {self.fish_count} con")
+        self.counter_lbl.config(text=f"🐟 {self.fish_count} con")
 
     def _update_state_ui(self, state: BotState):
         if state == BotState.IDLE or state == BotState.STOPPED:
-            self.status_lbl.config(text="🔴 ĐÃ DỪNG (Nhấn F1)", fg="#ed8796")
+            self.status_lbl.config(text="🔴 ĐÃ DỪNG (F1)", fg="#ed8796")
+            self.ticker_lbl.config(text="Sẵn sàng")
         elif state == BotState.STAGE_1:
-            self.status_lbl.config(text="🎣 BƯỚC 1: Quăng Cần", fg="#89b4fa")
+            self.status_lbl.config(text="🎣 B1: Quăng Cần", fg="#89b4fa")
+            self.ticker_lbl.config(text="Đang quăng cần...")
         elif state == BotState.STAGE_2:
-            self.status_lbl.config(text="🎯 BƯỚC 2: Canh Cá Cắn...", fg="#f9e2af")
+            self.status_lbl.config(text="🎯 B2: Canh Cá", fg="#f9e2af")
+            self.ticker_lbl.config(text="Đang canh chừng dấu '!'...")
         elif state == BotState.STAGE_3:
-            self.status_lbl.config(text="📦 BƯỚC 3: Lưu Cá Vào Balo", fg="#a6da95")
+            self.status_lbl.config(text="📦 B3: Lưu Balo", fg="#a6da95")
+            self.ticker_lbl.config(text="Đang lưu cá vào balo...")
         elif state == BotState.STAGE_REPAIR:
-            self.status_lbl.config(text="🔧 BƯỚC PHỤ: Sửa Cần Hỏng", fg="#cba6f7")
+            self.status_lbl.config(text="🔧 Sửa Cần", fg="#cba6f7")
+            self.ticker_lbl.config(text="Đang sửa cần câu...")
 
     def _format_simple_log(self, msg: str):
         """Translates raw engine logs into a clean, concise, human-friendly summary."""
@@ -457,7 +532,7 @@ class AutoFishingApp:
         if "PHÁT HIỆN DẤU CHẤM THAN" in msg:
             m = re.search(r"tại (\d+),\s*(\d+)", msg)
             coords = f" tại ({m.group(1)}, {m.group(2)})" if m else ""
-            return (f"⚡ [BƯỚC 2] CÁ CẮN! Phát hiện dấu '!'{coords}", "STEP_BITE")
+            return (f"⚡ [BƯỚC 2] CÁ CẮN! Dấu '!'{coords}", "STEP_BITE")
 
         if "KÍCH HOẠT: Giật cần" in msg:
             m = re.search(r"tại nút bấm \((\d+),\s*(\d+)\)", msg)
@@ -470,43 +545,43 @@ class AutoFishingApp:
         if "Đã thấy nút Bảo Quản" in msg:
             m = re.search(r"Click tại \((\d+),\s*(\d+)\)", msg)
             coords = f" tại ({m.group(1)}, {m.group(2)})" if m else ""
-            return (f"📦 [BƯỚC 3] ĐÃ ẤN NÚT BẢO QUẢN{coords}! (+1 cá vào balo 🐟)", "STEP_KEEP")
+            return (f"📦 [BƯỚC 3] ĐÃ ẤN BẢO QUẢN{coords}! (+1 cá 🐟)", "STEP_KEEP")
 
         if "HOÀN THÀNH 1 VÒNG CÂU" in msg:
-            sep = "━" * 46
-            return (f"{sep}\n✨ HOÀN THÀNH 1 VÒNG CÂU (Tổng câu: {self.fish_count} con cá 🐟)\n{sep}", "ROUND_COMPLETE")
+            sep = "━" * 38
+            return (f"{sep}\n✨ XONG 1 VÒNG CÂU (Tổng: {self.fish_count} con 🐟)\n{sep}", "ROUND_COMPLETE")
 
         if "TỰ SỬA TRẠNG THÁI" in msg:
             if "Nút Giật Cần vẫn còn" in msg:
-                return ("🔄 [TỰ NẮN CHỈNH] Nút Giật Cần vẫn còn -> Tiếp tục canh cá...", "STEP_ADJUST")
+                return ("🔄 [TỰ SỬA] Nút Giật Cần còn -> Canh cá tiếp...", "STEP_ADJUST")
             if "Bảo quản" in msg:
-                return ("🔄 [TỰ NẮN CHỈNH] Đã thấy popup Bảo Quản -> Chuyển sang nhận cá...", "STEP_ADJUST")
-            return ("🔄 [TỰ NẮN CHỈNH] Nhận diện màn hình -> Bot tự thích ứng!", "STEP_ADJUST")
+                return ("🔄 [TỰ SỬA] Thấy Bảo Quản -> Nhận cá...", "STEP_ADJUST")
+            return ("🔄 [TỰ SỬA] Tự nắn chỉnh theo màn hình!", "STEP_ADJUST")
 
         if "ĐỨT DÂY / HỤT CÁ" in msg:
-            return ("⚠️ Đứt dây câu / hụt cá -> Tự quăng cần mới.", "STEP_WARN")
+            return ("⚠️ Đứt dây / hụt cá -> Quăng cần mới.", "STEP_WARN")
 
         if "CHẶN BONG BÓNG" in msg:
-            return ("🛡️ Đã phát hiện & bỏ qua bóng nhiệm vụ/mong muốn trên đầu.", "STEP_INFO")
+            return ("🛡️ Bỏ qua bóng nhiệm vụ/mong muốn.", "STEP_INFO")
 
         if "Sửa Cần" in msg or "sửa cần" in msg.lower():
             if "Đã định vị nút Sửa Cần" in msg:
-                return ("🔧 [SỬA CẦN] Đã bấm nút trả tiền sửa cần...", "STEP_REPAIR")
+                return ("🔧 [SỬA CẦN] Đã bấm trả tiền sửa...", "STEP_REPAIR")
             if "Đang chờ nút xanh OK" in msg:
-                return ("🔧 [SỬA CẦN] Đang chờ hoàn thành sửa chữa...", "STEP_REPAIR")
+                return ("🔧 [SỬA CẦN] Đang chờ sửa chữa...", "STEP_REPAIR")
             if "Đã định vị nút OK" in msg:
                 return ("🔧 [SỬA CẦN] Đã bấm nút OK xác nhận!", "STEP_REPAIR")
             if "SỬA CẦN HOÀN THÀNH" in msg:
-                return ("✅ [SỬA CẦN] Cần câu đã sửa chữa hoàn tất! Tiếp tục câu.", "STEP_REPAIR")
+                return ("✅ [SỬA CẦN] Sửa chữa hoàn tất! Tiếp tục.", "STEP_REPAIR")
 
         if "BOT ĐÃ KHỞI ĐỘNG" in msg:
-            return ("🚀 BOT ĐÃ BẮT ĐẦU CHẠY (Nhấn F2 để dừng).", "ROUND_COMPLETE")
+            return ("🚀 BOT ĐÃ BẮT ĐẦU (F2 để dừng).", "ROUND_COMPLETE")
 
         if "BOT ĐÃ DỪNG" in msg:
-            return ("⏹ BOT ĐÃ DỪNG LẠI (Nhấn F1 để bắt đầu lại).", "STEP_WARN")
+            return ("⏹ BOT ĐÃ DỪNG (F1 để tiếp tục).", "STEP_WARN")
 
         if "KẸT >30s" in msg:
-            return ("⚠️ Cảnh báo: Kẹt quá 30s! Bot đã lưu ảnh bằng chứng.", "STEP_WARN")
+            return ("⚠️ Cảnh báo: Kẹt >30s! Đã lưu ảnh.", "STEP_WARN")
 
         return None
 
@@ -537,15 +612,21 @@ class AutoFishingApp:
                 self.simple_text.insert(tk.END, sim_text + "\n", sim_tag)
                 self.simple_text.see(tk.END)
 
+                # Update live ticker on the status card
+                clean_ticker = sim_text.replace("\n", " ").strip()
+                if "━" in clean_ticker:
+                    clean_ticker = f"✨ Xong 1 vòng ({self.fish_count} cá)"
+                self.ticker_lbl.config(text=clean_ticker[:32])
+
         # Buffer limits
         try:
             line_count_sim = int(self.simple_text.index("end-1c").split(".")[0])
-            if line_count_sim > 350:
-                self.simple_text.delete("1.0", f"{line_count_sim - 250}.0")
+            if line_count_sim > 300:
+                self.simple_text.delete("1.0", f"{line_count_sim - 200}.0")
 
             line_count_dbg = int(self.debug_text.index("end-1c").split(".")[0])
-            if line_count_dbg > 600:
-                self.debug_text.delete("1.0", f"{line_count_dbg - 400}.0")
+            if line_count_dbg > 500:
+                self.debug_text.delete("1.0", f"{line_count_dbg - 350}.0")
         except Exception:
             pass
 

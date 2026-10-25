@@ -406,30 +406,43 @@ class BotEngine:
 
                 while not self._stop_event.is_set() and not self._pause_event.is_set():
                     frame_full, off_full = self.capturer.capture(None)
-                    fh, fw = frame_full.shape[:2]
                     now = time.time()
                     elapsed_st1 = now - stage1_start
 
-                    # 1. ƯU TIÊN SỐ 1 (Fast Path): Quét nút Quăng Cần trong vùng thao tác (góc dưới bên phải)
-                    # Quét đơn tỉ lệ trước (~20ms), chỉ bật đa tỉ lệ nếu >1.5s chưa thấy
-                    rx, ry = int(fw * 0.65), int(fh * 0.55)
-                    action_frame = frame_full[ry:, rx:]
-                    action_offset = (off_full[0] + rx, off_full[1] + ry)
+                    # Sensory Closed-Loop: Quét toàn diện thực tế màn hình qua RegionScanner (<25ms)
+                    sc1 = self.scanner.scan(frame_full, origin=off_full)
 
-                    use_multi = (elapsed_st1 > 1.5)
-                    match1 = self.matcher.match_any(action_frame, img1_path, threshold=thresh1, screen_offset=action_offset, multi_scale=use_multi)
-
-                    if match1.found:
+                    # 1. ƯU TIÊN SỐ 1: Nút Quăng Cần sẵn sàng -> Click quăng cần
+                    if sc1["cast"].found:
                         self.watchdog.note_progress("cast")
+                        match1 = MatchResult(found=True, confidence=sc1["cast"].score, x=sc1["cast"].x, y=sc1["cast"].y, w=sc1["cast"].w, h=sc1["cast"].h, template_name=sc1["cast"].template)
                         self._last_img1_match = match1
                         cx, cy = self.matcher.get_random_click_point(match1, margin=margin)
                         self._log(f" -> Đã thấy nút Quăng Cần ({match1.template_name}, độ khớp {match1.confidence:.2f}). Click tại ({cx}, {cy})")
                         self.input_sim.click(cx, cy, hold_min_ms=hold_min, hold_max_ms=hold_max)
 
-                        # Chuyển ngay sang STAGE 2 (STAGE 2 đã có sẵn watchdog tự động phát hiện cần hỏng / hụt cá)
                         self._set_state(BotState.STAGE_2)
                         self._log(f"==> Chuyển sang {self.state.value}")
-                        time.sleep(random.uniform(0.20, 0.35))  # Delay nhỏ để game bắt đầu quăng phao
+                        time.sleep(random.uniform(0.20, 0.35))
+                        break
+
+                    # 2. ƯU TIÊN SỐ 2 (TỰ SỬA TRẠNG THÁI): Nút Giật Cần đang hiện -> Thực tế đang câu dở dang!
+                    if sc1["reel"].found:
+                        self._last_img1_match = MatchResult(found=True, confidence=sc1["reel"].score, x=sc1["reel"].x, y=sc1["reel"].y, w=sc1["reel"].w, h=sc1["reel"].h, template_name=sc1["reel"].template)
+                        self._log(f"🔄 [TỰ SỬA TRẠNG THÁI] Nút Giật Cần đang hiện ({sc1['reel'].score:.2f})! Màn hình báo đang câu cá -> Vào thẳng BƯỚC 2...")
+                        self._set_state(BotState.STAGE_2)
+                        break
+
+                    # 3. ƯU TIÊN SỐ 3 (TỰ SỬA TRẠNG THÁI): Popup Bảo Quản đang mở -> Đã có cá sẵn!
+                    if sc1["keep"].found:
+                        self._log(f"🔄 [TỰ SỬA TRẠNG THÁI] Popup 'Bảo quản' đang mở ({sc1['keep'].score:.2f})! -> Vào thẳng BƯỚC 3...")
+                        self._set_state(BotState.STAGE_3)
+                        break
+
+                    # 4. ƯU TIÊN SỐ 4 (TỰ SỬA TRẠNG THÁI): Bảng Sửa Cần đang mở
+                    if sc1["repair_title"].found or sc1["done_title"].found or sc1["ok"].found:
+                        self._log("⚠️ [TỰ SỬA TRẠNG THÁI] Bảng sửa cần đang mở! -> Vào thẳng BƯỚC SỬA CẦN...")
+                        self._set_state(BotState.STAGE_REPAIR)
                         break
 
                     # Watchdog kiểm tra kẹt
@@ -439,7 +452,7 @@ class BotEngine:
                         ts = datetime.now().strftime("%H%M%S")
                         stuck_path = os.path.join(stuck_dir, f"{ts}.jpg")
                         cv2.imwrite(stuck_path, frame_full)
-                        self._log(f"⚠️ [KẸT >30s] Bot chưa có tiến triển trong 30s (Quăng={match1.confidence:.2f})! Đã lưu ảnh hiện tại vào {stuck_path}")
+                        self._log(f"⚠️ [KẸT >30s] Bot chưa có tiến triển trong 30s (Quăng={sc1['cast'].score:.2f})! Đã lưu ảnh hiện tại vào {stuck_path}")
 
                     if self.watchdog.stalled():
                         self._log("🚨 [KẸT >90s] Không có tiến triển trong 90s! Tự động dừng bot để bảo vệ an toàn.")
@@ -451,33 +464,12 @@ class BotEngine:
                         self.stop()
                         break
 
-                    # 2. ƯU TIÊN SỐ 2 (Fallback): Chỉ khi không thấy nút Quăng Cần sau 0.6s mới kiểm tra bảng Sửa Cần
-                    # Quét trong ROI trung tâm màn hình, đơn tỉ lệ để tránh nghẽn luồng (~30ms)
-                    if elapsed_st1 > 0.6 and (now - last_modal_check >= 1.0):
-                        last_modal_check = now
-                        center_y1, center_y2 = int(fh * 0.15), int(fh * 0.60)
-                        center_x1, center_x2 = int(fw * 0.25), int(fw * 0.75)
-                        center_roi = frame_full[center_y1:center_y2, center_x1:center_x2]
-                        center_off = (off_full[0] + center_x1, off_full[1] + center_y1)
-
-                        m_repair = self.matcher.match_any(center_roi, sua_can_title, threshold=thresh_repair, screen_offset=center_off, multi_scale=False)
-                        m_ht = self.matcher.match_any(center_roi, hoan_thanh_title, threshold=thresh_repair, screen_offset=center_off, multi_scale=False)
-                        m_ok = self.matcher.match_any(center_roi, ok_btn, threshold=thresh_ok, screen_offset=center_off, multi_scale=False)
-
-                        if m_repair.found or m_ht.found or m_ok.found:
-                            self._log("⚠️ Phát hiện bảng sửa cần đang mở! Vào bước sửa cần.")
-                            self._set_state(BotState.STAGE_REPAIR)
-                            break
-
-                    # Tự phục hồi: Nếu tìm 3.5s không thấy, tự kiểm tra lại ngữ cảnh
+                    # Tự phục hồi: Nếu tìm >3.5s chưa có kết quả, reset lại stage1_start
                     if elapsed_st1 > 3.5:
-                        new_state = self._auto_detect_state()
-                        if new_state != BotState.STAGE_1:
-                            self._set_state(new_state)
-                            break
                         stage1_start = time.time()
 
                     time.sleep(0.04)
+
 
             # ========================================================
             # STAGE 2: Chờ Dấu Chấm Than xuất hiện trên đầu nhân vật -> Giật cần
@@ -586,6 +578,13 @@ class BotEngine:
                                 if m_rep2.found:
                                     self._log(f"⚠️ Cần câu bị hỏng (phát hiện bảng sửa cần khớp {m_rep2.confidence:.2f})! Vào bước sửa cần...")
                                     self._set_state(BotState.STAGE_REPAIR)
+                                    break
+
+                                # Popup Bảo Quản mở sẵn (trường hợp cá cắn tự động mà không thấy '!')
+                                sc_keep = self.scanner.scan(full_frame, origin=full_offset, names=["keep"])
+                                if sc_keep["keep"].found:
+                                    self._log(f"🔄 [TỰ SỬA TRẠNG THÁI] Popup 'Bảo quản' ({sc_keep['keep'].score:.2f}) đã mở sẵn! Vào thẳng BƯỚC 3...")
+                                    self._set_state(BotState.STAGE_3)
                                     break
 
                     if effective_region is None:
@@ -704,35 +703,28 @@ class BotEngine:
                 thresh_ok = thresholds.get("b4_btn_ok", 0.70)
 
                 self._log(f"[{self.state.value}] Đang quét tìm nút Bảo Quản hoặc trạng thái phục hồi...")
-                timeout_stage3 = 25  # Đợi tối đa 25s
+                timeout_stage3 = 10  # Đợi tối đa 10s (thay vì 25s mù quáng)
                 start_stage3 = time.time()
-                last_repair_check_st3 = 0.0
 
                 while not self._stop_event.is_set() and not self._pause_event.is_set():
                     now = time.time()
                     elapsed_st3 = now - start_stage3
                     if elapsed_st3 > timeout_stage3:
-                        self._log("[HẾT GIỜ] Không tìm thấy nút Bảo Quản! Tự động kiểm tra lại màn hình...")
+                        self._log("[HẾT GIỜ] Không tìm thấy nút Bảo Quản sau 10s! Tự động kiểm tra lại màn hình...")
                         self._set_state(self._auto_detect_state())
                         break
 
                     frame3, offset3 = self.capturer.capture(None)
-                    fh3, fw3 = frame3.shape[:2]
 
-                    # 1. ƯU TIÊN SỐ 1: Nút Bảo Quản trong vùng góc dưới bên phải (X >= 45%, Y >= 45%)
-                    # Nút Bảo Quản luôn nằm ở nửa dưới bên phải màn hình
-                    bq_rx, bq_ry = int(fw3 * 0.45), int(fh3 * 0.45)
-                    bq_roi = frame3[bq_ry:, bq_rx:]
-                    bq_offset = (offset3[0] + bq_rx, offset3[1] + bq_ry)
+                    # Closed-Loop Perception: Quét đồng thời toàn bộ mục tiêu qua RegionScanner (<25ms)
+                    sc3 = self.scanner.scan(frame3, origin=offset3)
 
-                    # Quét đơn tỉ lệ trước (~15ms), nếu >2.0s chưa thấy mới quét đa tỉ lệ
-                    use_bq_multi = (elapsed_st3 > 2.0)
-                    match3 = self.matcher.match_any(bq_roi, img3_path, threshold=thresh3, screen_offset=bq_offset, multi_scale=use_bq_multi)
-
-                    if match3.found:
+                    # 1. ƯU TIÊN SỐ 1: Nút Bảo Quản (bắt được cá)
+                    if sc3["keep"].found:
                         self.watchdog.note_progress("keep")
+                        match3 = MatchResult(found=True, confidence=sc3["keep"].score, x=sc3["keep"].x, y=sc3["keep"].y, w=sc3["keep"].w, h=sc3["keep"].h, template_name=sc3["keep"].template)
                         cx, cy = self.matcher.get_random_click_point(match3, margin=margin)
-                        self._log(f" -> Đã thấy nút Bảo Quản ({match3.template_name}, độ khớp {match3.confidence:.2f}). Click tại ({cx}, {cy})")
+                        self._log(f" -> Đã thấy nút Bảo Quản ({sc3['keep'].template}, độ khớp {sc3['keep'].score:.2f}). Click tại ({cx}, {cy})")
                         self.input_sim.click(cx, cy, hold_min_ms=hold_min, hold_max_ms=hold_max)
                         self.stats["caught"] += 1
                         self._log_stats()
@@ -741,38 +733,32 @@ class BotEngine:
                                 self.on_fish_caught()
                             except Exception:
                                 pass
-                        time.sleep(random.uniform(0.20, 0.35))  # Phản xạ nhanh: chỉ cần 200-350ms cho game ghi nhận click
+                        time.sleep(random.uniform(0.20, 0.35))
                         self._log("🔄 HOÀN THÀNH 1 VÒNG CÂU! Tự chuyển vòng mới...")
                         self._set_state(BotState.STAGE_1)
                         break
 
-                    # 2. ƯU TIÊN SỐ 2: Tự phục hồi đứt dây câu / hụt cá -> Nút Quăng Cần xuất hiện lại
-                    rx3, ry3 = int(fw3 * 0.65), int(fh3 * 0.55)
-                    action_f3 = frame3[ry3:, rx3:]
-                    action_off3 = (offset3[0] + rx3, offset3[1] + ry3)
-                    match_quang = self.matcher.match_any(action_f3, img1_path, threshold=thresh1, screen_offset=action_off3, multi_scale=False)
-                    if match_quang.found:
+                    # 2. ƯU TIÊN SỐ 2: Đứt dây / hụt cá -> Nút Quăng Cần xuất hiện lại
+                    if sc3["cast"].found:
                         self.stats["missed_after_click"] += 1
-                        self._log(f"⚠️ [ĐỨT DÂY / HỤT CÁ] Phát hiện nút Quăng Cần ({match_quang.template_name}, {match_quang.confidence:.2f}) đã mở lại! Tự động quay về BƯỚC 1 quăng cần mới...")
+                        self._log(f"⚠️ [ĐỨT DÂY / HỤT CÁ] Nút Quăng Cần ({sc3['cast'].template}, {sc3['cast'].score:.2f}) đã mở lại! Quay về BƯỚC 1 quăng cần mới...")
                         self._log_stats()
                         self._set_state(BotState.STAGE_1)
                         break
 
-                    # 3. ƯU TIÊN SỐ 3: Kiểm tra cần hỏng thưa thớt (sau 1.5s, mỗi 1.5s/lần) trong vùng trung tâm
-                    if elapsed_st3 > 1.5 and (now - last_repair_check_st3 >= 1.5):
-                        last_repair_check_st3 = now
-                        center_y1, center_y2 = int(fh3 * 0.15), int(fh3 * 0.60)
-                        center_x1, center_x2 = int(fw3 * 0.25), int(fw3 * 0.75)
-                        center_roi3 = frame3[center_y1:center_y2, center_x1:center_x2]
-                        center_off3 = (offset3[0] + center_x1, offset3[1] + center_y1)
+                    # 3. ƯU TIÊN SỐ 3: Cần câu bị hỏng (Modal Sửa Cần xuất hiện)
+                    if sc3["repair_title"].found or sc3["done_title"].found or sc3["ok"].found:
+                        self._log("⚠️ Cần câu bị hỏng (phát hiện bảng sửa cần)! Vào bước sửa cần...")
+                        self._set_state(BotState.STAGE_REPAIR)
+                        break
 
-                        m_rep3 = self.matcher.match_any(center_roi3, sua_can_title, threshold=thresh_repair, screen_offset=center_off3, multi_scale=False)
-                        m_ht3 = self.matcher.match_any(center_roi3, hoan_thanh_title, threshold=thresh_repair, screen_offset=center_off3, multi_scale=False)
-                        m_ok3 = self.matcher.match_any(center_roi3, ok_btn, threshold=thresh_ok, screen_offset=center_off3, multi_scale=False)
-                        if m_rep3.found or m_ht3.found or m_ok3.found:
-                            self._log("⚠️ Phát hiện cần câu bị hỏng sau khi giật! Chuyển sang sửa cần tự động...")
-                            self._set_state(BotState.STAGE_REPAIR)
-                            break
+                    # 4. ƯU TIÊN SỐ 4 (CLOSED-LOOP RECOVERY CHỐNG KẸT): NÚT GIẬT CẦN VẪN CÒN TRÊN MÀN HÌNH!
+                    # Nếu đã vào BƯỚC 3 mà sau 0.8s nút Giật Cần vẫn còn, chứng tỏ thực tế nhân vật VẪN ĐANG CÂU CÁ.
+                    # Lập tức tự sửa trạng thái quay lại BƯỚC 2 tiếp tục canh cá, không được đứng chờ mù quáng!
+                    if elapsed_st3 > 0.8 and sc3["reel"].found:
+                        self._log(f"🔄 [TỰ SỬA TRẠNG THÁI] Nút Giật Cần vẫn còn ({sc3['reel'].score:.2f})! Màn hình chứng minh vẫn đang câu cá -> Quay lại BƯỚC 2 canh cá tiếp...")
+                        self._set_state(BotState.STAGE_2)
+                        break
 
                     time.sleep(0.04)
 

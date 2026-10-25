@@ -11,6 +11,11 @@ from core.input_sim import InputSimulator
 from core.diagnostics import StageTwoRecorder
 from core.head_locator import NameLocator
 from core.plate_locator import PlateLocator, PlateTracker
+from core.scale_aware import BiteTemplateBank, scaled_head_roi
+from core.static_veto import StaticVeto
+from core.outcome_recorder import attach_outcome_recorder
+from core.geometry import Rect
+import cv2
 
 
 class BotState(Enum):
@@ -63,6 +68,12 @@ class BotEngine:
         self.plate_tracker = PlateTracker(self.plate_locator)
         self.name_locator = self.plate_locator  # backward compatibility / telemetry fallback
 
+        # P1b: Scale-aware '!' template bank & StaticVeto
+        b2_cham_than_dir = config.get("templates", {}).get("b2_cham_than", "assets/B2_DangCau/dau_cham_than")
+        self.bite_bank = BiteTemplateBank(b2_cham_than_dir, reference_scale=1.0)
+        self.static_veto = StaticVeto()
+        self.stats["static_vetoed"] = 0
+
         # Cached last known match for img1 and head ROI
         self._last_img1_match: Optional[MatchResult] = None
         self._last_good_head_roi: Optional[Tuple[int, int, int, int]] = None  # only ever set from a real name match
@@ -72,6 +83,8 @@ class BotEngine:
         if tel_cfg.get("enabled", False):
             from core.instrumentation import attach_telemetry
             attach_telemetry(self, jsonl_path=tel_cfg.get("jsonl_path", "telemetry/telemetry.jsonl"))
+        # P1b: Outcome recorder (corpus/<caught|missed|rod_retracted>)
+        attach_outcome_recorder(self, "corpus")
 
     @staticmethod
     def _clamp_region(region, frame, offset):
@@ -234,9 +247,10 @@ class BotEngine:
         st = self.stats
         total = st["caught"] + st["missed_after_click"] + st["lost_before_bite"]
         rate = (100.0 * st["caught"] / total) if total else 0.0
+        vetoed = st.get('static_vetoed', 0)
         self._log(f"📊 [THỐNG KÊ] Thấy '!': {st['bite_seen']} | Dính cá: {st['caught']} | "
-                  f"Giật nhưng hụt: {st['missed_after_click']} | Mất cá khi chưa thấy '!': {st['lost_before_bite']} "
-                  f"=> tỉ lệ dính {rate:.0f}% ({st['caught']}/{total})")
+                  f"Giật nhưng hụt: {st['missed_after_click']} | Mất cá chưa '!': {st['lost_before_bite']} | "
+                  f"Chặn vật tĩnh: {vetoed} => tỉ lệ dính {rate:.0f}% ({st['caught']}/{total})")
 
     def _log(self, message: str):
         now = datetime.now().strftime("%H:%M:%S")
@@ -470,6 +484,7 @@ class BotEngine:
                 reel_floor = thresholds.get("b2_giat_can_locate", 0.40)
                 reel_match: Optional[MatchResult] = None
 
+                self.static_veto.reset()
                 self.recorder.begin_cast(effective_region, {"thresh2": thresh2})
                 self._log(f"[{self.state.value}] Đang canh chừng Dấu Chấm Than (tần số cao, tối đa {timeout_sec}s)...")
 
@@ -493,11 +508,15 @@ class BotEngine:
 
                         # 1. Định vị nhân vật qua PlateTracker (P1a: hue-mask, blob-based, windowed)
                         track_res = self.plate_tracker.update(full_frame, full_offset)
+                        if track_res.state == "LOST":
+                            self.static_veto.reset()
                         if track_res.ambiguous:
                             self._log(" -> [CẢNH BÁO] Phát hiện nhiều người chơi có tên màu xanh tương tự. Giữ nguyên mục tiêu hiện tại.")
                         loc = track_res.hit
                         if loc is not None:
-                            new_roi = self._clamp_region(loc.head_roi(), full_frame, full_offset)
+                            # P1b: scaled_head_roi theo zoom của camera
+                            s_roi = scaled_head_roi(loc.plate, loc.scale)
+                            new_roi = self._clamp_region(s_roi.to_tuple(), full_frame, full_offset)
                             moved = effective_region is None or abs(new_roi[0] - effective_region[0]) > 20 or abs(new_roi[1] - effective_region[1]) > 20
                             if moved:
                                 self._log(f" -> Định vị nhân vật '{loc.name}' (độ khớp {loc.score:.2f}, scale {loc.scale:.2f}): vùng đầu = {new_roi}")
@@ -531,13 +550,18 @@ class BotEngine:
                                 self._set_state(BotState.STAGE_1)
                                 break
 
-                            # Popup sửa cần: kiểm tra thưa (3s/lần), đơn tỉ lệ ~105ms. (Bản cũ: đa tỉ lệ ~1000ms mỗi 0.5s.)
+                            # Popup sửa cần (P1b Step D): chỉ quét VÙNG TRUNG TÂM (x 25-75%, y 15-60%) ~22% diện tích -> ~50ms
                             if now - last_repair_check >= 3.0:
                                 last_repair_check = now
+                                fh_m, fw_m = full_frame.shape[:2]
+                                cx0, cy0 = int(fw_m * 0.25), int(fh_m * 0.15)
+                                cx1, cy1 = int(fw_m * 0.75), int(fh_m * 0.60)
+                                center_crop = full_frame[cy0:cy1, cx0:cx1]
+                                center_offset = (full_offset[0] + cx0, full_offset[1] + cy0)
                                 sua_can_title = templates.get("b4_sua_can_title", "assets/B4_SuaCan/title")
                                 thresh_repair = thresholds.get("b4_sua_can", 0.70)
-                                m_rep2 = self.matcher.match_any(full_frame, sua_can_title, threshold=thresh_repair,
-                                                                screen_offset=full_offset, multi_scale=False)
+                                m_rep2 = self.matcher.match_any(center_crop, sua_can_title, threshold=thresh_repair,
+                                                                screen_offset=center_offset, multi_scale=False)
                                 if m_rep2.found:
                                     self._log(f"⚠️ Cần câu bị hỏng (phát hiện bảng sửa cần khớp {m_rep2.confidence:.2f})! Vào bước sửa cần...")
                                     self._set_state(BotState.STAGE_REPAIR)
@@ -552,13 +576,28 @@ class BotEngine:
                         continue
 
                     frame, offset = self.capturer.capture(effective_region)
-                    # Grace period: trong 2.0s đầu sau khi quăng cần, cần chưa xuống nước và cá chưa thể cắn.
-                    # Bỏ qua kiểm tra '!' trong 2.0s đầu để triệt tiêu hoàn toàn false-positive (màu áo/nón/cần).
-                    if (now - start_wait_time) >= 2.0:
-                        # Quét siêu nhanh ở tỷ lệ gốc 1.0x (chỉ mất ~20ms) để không bỏ lỡ khoảnh khắc cá cắn 0.5s
-                        match2 = self.matcher.match_any(frame, img2_path, threshold=thresh2, screen_offset=offset, multi_scale=False)
-                    else:
-                        match2 = MatchResult(found=False)
+
+                    # P1b Step C: StaticVeto quan sát mỗi nhịp quét
+                    self.static_veto.observe(frame, offset)
+
+                    # P1b Step B & C: Quét '!' theo scale của PlateTracker và kiểm tra StaticVeto
+                    match2 = MatchResult(found=False)
+                    if (now - start_wait_time) >= 1.5:
+                        scale = loc.scale if loc is not None else 1.0
+                        gray_strip = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                        bm = self.bite_bank.best_match(gray_strip, scale)
+                        if bm is not None and bm.score >= thresh2:
+                            gx, gy = offset[0] + bm.x, offset[1] + bm.y
+                            veto_res = self.static_veto.is_static(Rect(gx, gy, bm.w, bm.h), bm.score, bm.template)
+                            if veto_res.static:
+                                self.stats["static_vetoed"] = self.stats.get("static_vetoed", 0) + 1
+                                self._log(f" -> [CHẶN VẬT TĨNH] Bỏ qua '{bm.name}' (khớp {bm.score:.2f}) tại ({gx}, {gy}) vì đã tồn tại từ {veto_res.ref_age:.1f}s trước (điểm cũ {veto_res.ref_score:.2f})")
+                            else:
+                                match2 = MatchResult(found=True, confidence=bm.score, x=gx, y=gy,
+                                                     w=bm.w, h=bm.h, template_name=bm.name)
+                                if hasattr(self, "outcome_recorder") and self.outcome_recorder is not None:
+                                    self.outcome_recorder.note_hit(x=gx, y=gy, w=bm.w, h=bm.h,
+                                                                   score=round(bm.score, 3), template=bm.name)
 
                     scan_t = time.time()
                     if last_scan_t is not None:

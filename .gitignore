@@ -11,6 +11,7 @@ dist/
 # Local diagnostics, session recordings & logs
 diagnostics/
 telemetry/
+corpus/
 *.log
 *.tmp
 temp/

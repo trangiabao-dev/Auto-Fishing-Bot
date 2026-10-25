@@ -3,7 +3,7 @@ import sys
 import json
 import time
 import queue
-import threading
+import re
 from datetime import datetime
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
@@ -25,14 +25,15 @@ def load_config(config_path: str = "config.json"):
 class AutoFishingApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Auto Fishing Bot - Play Together")
-        self.root.geometry("580x620")
-        self.root.minsize(500, 500)
+        self.root.title("Auto Fishing Bot - Play Together [Pro Edition]")
+        self.root.geometry("620x720")
+        self.root.minsize(540, 560)
         self.root.configure(bg="#181825")
 
         # Window and option states
         self.is_topmost = tk.BooleanVar(value=True)
-        self.auto_clear_log = tk.BooleanVar(value=True)
+        self.auto_clear_simple = tk.BooleanVar(value=False)
+        self.auto_clear_debug = tk.BooleanVar(value=True)
         self.root.attributes("-topmost", True)
 
         # Thread-safe log queue
@@ -54,14 +55,14 @@ class AutoFishingApp:
         self.hotkey_mgr = HotkeyManager()
         self._setup_hotkeys()
 
-        # Build UI
+        # Build Modern UI
         self._build_ui()
 
         # Schedule auto-clear log timer (every 60s)
         self.root.after(60000, self._schedule_auto_clear)
 
         # Start periodic queue polling
-        self.root.after(100, self._process_log_queue)
+        self.root.after(80, self._process_log_queue)
 
         # Cleanup on close
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -73,58 +74,61 @@ class AutoFishingApp:
         # Global system hooks
         self.hotkey_mgr.register(start_key, self.start_bot)
         self.hotkey_mgr.register(stop_key, self.stop_bot)
-        self.hotkey_mgr.register("f3", self.engine.recorder.request_dump)  # Step 0: nhấn khi thấy '!' trên đầu
+        self.hotkey_mgr.register("f3", self.engine.recorder.request_dump)
 
     def _build_ui(self):
-        # 1. Header Frame
+        # 1. Header Frame with Modern Styling
         header = tk.Frame(self.root, bg="#181825", pady=10)
         header.pack(fill="x", padx=15)
 
+        title_box = tk.Frame(header, bg="#181825")
+        title_box.pack(fill="x")
+
         title_lbl = tk.Label(
-            header,
+            title_box,
             text="🎣 AUTO FISHING BOT",
             font=("Segoe UI", 16, "bold"),
             fg="#8aadf4",
             bg="#181825"
         )
-        title_lbl.pack(anchor="w")
+        title_lbl.pack(side="left")
+
+        ver_pill = tk.Label(
+            title_box,
+            text="PRO v2.5",
+            font=("Segoe UI", 8, "bold"),
+            bg="#313244",
+            fg="#a6da95",
+            padx=7,
+            pady=2
+        )
+        ver_pill.pack(side="left", padx=10)
 
         sub_lbl = tk.Label(
             header,
-            text="Nhận diện thị giác máy tính • Tự bám đầu nhân vật • Chống giật nhầm",
-            font=("Segoe UI", 9),
+            text="Vòng Lặp Khép Kín • Tự Phục Hồi Lệch Bước • Chống Giật Nhầm • Khóa Tọa Độ",
+            font=("Segoe UI", 8),
             fg="#a5adcb",
             bg="#181825"
         )
-        sub_lbl.pack(anchor="w")
+        sub_lbl.pack(anchor="w", pady=(3, 0))
 
-        hint_lbl = tk.Label(
-            header,
-            text="💡 Gợi ý: Có thể thu nhỏ cửa sổ bot [-] xuống Taskbar, bot vẫn tự câu ngầm!",
-            font=("Segoe UI", 8, "italic"),
-            fg="#94e2d5",
-            bg="#181825"
-        )
-        hint_lbl.pack(anchor="w", pady=(2, 0))
-
-        # 2. Status Card
-        card = tk.Frame(self.root, bg="#24273a", padx=15, pady=12, relief="flat", bd=0)
+        # 2. Modern Status & Counter Card
+        card = tk.Frame(self.root, bg="#1e1e2e", padx=15, pady=12, highlightbackground="#313244", highlightthickness=1)
         card.pack(fill="x", padx=15, pady=5)
 
-        # Status text
-        status_box = tk.Frame(card, bg="#24273a")
+        status_box = tk.Frame(card, bg="#1e1e2e")
         status_box.pack(fill="x")
 
-        tk.Label(status_box, text="Trạng thái:", font=("Segoe UI", 10, "bold"), fg="#cad3f5", bg="#24273a").pack(side="left")
-        self.status_lbl = tk.Label(status_box, text="🔴 ĐÃ DỪNG (Sẵn sàng)", font=("Segoe UI", 10, "bold"), fg="#ed8796", bg="#24273a")
+        tk.Label(status_box, text="Trạng thái:", font=("Segoe UI", 10, "bold"), fg="#cad3f5", bg="#1e1e2e").pack(side="left")
+        self.status_lbl = tk.Label(status_box, text="🔴 ĐÃ DỪNG (Sẵn sàng)", font=("Segoe UI", 10, "bold"), fg="#ed8796", bg="#1e1e2e")
         self.status_lbl.pack(side="left", padx=10)
 
-        # Fish counter
-        self.counter_lbl = tk.Label(card, text="🐟 Số cá đã câu: 0 con", font=("Segoe UI", 11, "bold"), fg="#a6da95", bg="#24273a")
-        self.counter_lbl.pack(anchor="w", pady=(8, 0))
+        self.counter_lbl = tk.Label(status_box, text="🐟 Đã câu: 0 con", font=("Segoe UI", 10, "bold"), fg="#a6da95", bg="#1e1e2e")
+        self.counter_lbl.pack(side="right")
 
-        # 3. Control Buttons
-        btn_frame = tk.Frame(self.root, bg="#181825", pady=10)
+        # 3. Big Modern Control Buttons
+        btn_frame = tk.Frame(self.root, bg="#181825", pady=8)
         btn_frame.pack(fill="x", padx=15)
 
         self.btn_start = tk.Button(
@@ -134,6 +138,7 @@ class AutoFishingApp:
             bg="#a6da95",
             fg="#181825",
             activebackground="#8bd57e",
+            activeforeground="#181825",
             relief="flat",
             cursor="hand2",
             padx=15,
@@ -149,6 +154,7 @@ class AutoFishingApp:
             bg="#ed8796",
             fg="#181825",
             activebackground="#e0697a",
+            activeforeground="#181825",
             relief="flat",
             cursor="hand2",
             padx=15,
@@ -157,12 +163,12 @@ class AutoFishingApp:
         )
         self.btn_stop.pack(side="left", expand=True, fill="x", padx=(6, 0))
 
-        # 4. Checkbox Options
-        opts_frame = tk.Frame(self.root, bg="#181825")
-        opts_frame.pack(fill="x", padx=15, pady=(0, 5))
+        # 4. Top Quick Options Bar
+        opts_bar = tk.Frame(self.root, bg="#181825")
+        opts_bar.pack(fill="x", padx=15, pady=(0, 4))
 
         top_check = tk.Checkbutton(
-            opts_frame,
+            opts_bar,
             text="📌 Luôn nổi (Top)",
             variable=self.is_topmost,
             font=("Segoe UI", 9),
@@ -170,26 +176,13 @@ class AutoFishingApp:
             bg="#181825",
             activebackground="#181825",
             activeforeground="#cad3f5",
-            selectcolor="#24273a",
+            selectcolor="#1e1e2e",
             command=self._toggle_topmost
         )
         top_check.pack(side="left")
 
-        auto_clear_check = tk.Checkbutton(
-            opts_frame,
-            text="🧹 Tự xóa log (60s)",
-            variable=self.auto_clear_log,
-            font=("Segoe UI", 9),
-            fg="#cad3f5",
-            bg="#181825",
-            activebackground="#181825",
-            activeforeground="#cad3f5",
-            selectcolor="#24273a"
-        )
-        auto_clear_check.pack(side="left", padx=(8, 0))
-
         test_btn = tk.Button(
-            opts_frame,
+            opts_bar,
             text="📸 Soi Mắt Bot",
             font=("Segoe UI", 8, "bold"),
             bg="#8aadf4",
@@ -197,68 +190,186 @@ class AutoFishingApp:
             activebackground="#7dc4e4",
             relief="flat",
             cursor="hand2",
-            padx=8,
+            padx=10,
+            pady=2,
             command=self._test_bot_vision
         )
-        test_btn.pack(side="right", padx=(4, 0))
+        test_btn.pack(side="right")
 
-        clear_btn = tk.Button(
-            opts_frame,
-            text="🧹 Xóa Log",
+        # 5. Segmented Notebook Tabs (Trạng Thái Rút Gọn vs Log Chi Tiết Debug)
+        style = ttk.Style()
+        style.theme_use('clam')
+        style.configure('Custom.TNotebook', background='#181825', borderwidth=0)
+        style.configure('Custom.TNotebook.Tab', background='#1e1e2e', foreground='#cad3f5', padding=[14, 7], font=('Segoe UI', 9, 'bold'), borderwidth=0)
+        style.map('Custom.TNotebook.Tab',
+                  background=[('selected', '#313244'), ('active', '#24273a')],
+                  foreground=[('selected', '#8aadf4'), ('active', '#b4befe')])
+
+        self.notebook = ttk.Notebook(self.root, style='Custom.TNotebook')
+        self.notebook.pack(fill='both', expand=True, padx=15, pady=5)
+
+        # Tab 1: Trạng Thái Rút Gọn
+        self.tab_simple = tk.Frame(self.notebook, bg="#181825")
+        self.notebook.add(self.tab_simple, text="📋 Trạng Thái Bot (Rút Gọn)")
+
+        t1_toolbar = tk.Frame(self.tab_simple, bg="#181825", pady=4)
+        t1_toolbar.pack(fill="x")
+
+        tk.Checkbutton(
+            t1_toolbar,
+            text="🧹 Tự xóa log (60s)",
+            variable=self.auto_clear_simple,
             font=("Segoe UI", 8),
-            bg="#363a4f",
+            fg="#a6adc8",
+            bg="#181825",
+            activebackground="#181825",
+            selectcolor="#1e1e2e"
+        ).pack(side="left")
+
+        tk.Button(
+            t1_toolbar,
+            text="🧹 Xóa Màn Hình",
+            font=("Segoe UI", 8),
+            bg="#313244",
             fg="#cad3f5",
-            activebackground="#494d64",
+            activebackground="#45475a",
             relief="flat",
             cursor="hand2",
-            command=self._clear_log
+            padx=8,
+            pady=1,
+            command=self._clear_simple_log
+        ).pack(side="right")
+
+        self.simple_text = scrolledtext.ScrolledText(
+            self.tab_simple,
+            bg="#1e1e2e",
+            fg="#cdd6f4",
+            insertbackground="#cdd6f4",
+            font=("Segoe UI", 9),
+            wrap="word",
+            relief="flat",
+            bd=0,
+            padx=8,
+            pady=8
         )
-        clear_btn.pack(side="right")
+        self.simple_text.pack(fill="both", expand=True)
 
-        # 5. Real-time Log Console
-        log_frame = tk.Frame(self.root, bg="#181825")
-        log_frame.pack(fill="both", expand=True, padx=15, pady=5)
+        # Tags styling for Tab 1
+        self.simple_text.tag_config("ROUND_COMPLETE", foreground="#a6da95", font=("Segoe UI", 9, "bold"))
+        self.simple_text.tag_config("STEP_CAST", foreground="#89b4fa", font=("Segoe UI", 9, "bold"))
+        self.simple_text.tag_config("STEP_WAIT", foreground="#f9e2af", font=("Segoe UI", 9))
+        self.simple_text.tag_config("STEP_BITE", foreground="#f38ba8", font=("Segoe UI", 10, "bold"))
+        self.simple_text.tag_config("STEP_KEEP", foreground="#a6e3a1", font=("Segoe UI", 9, "bold"))
+        self.simple_text.tag_config("STEP_REPAIR", foreground="#cba6f7", font=("Segoe UI", 9, "bold"))
+        self.simple_text.tag_config("STEP_ADJUST", foreground="#89dceb", font=("Segoe UI", 9, "italic"))
+        self.simple_text.tag_config("STEP_WARN", foreground="#fab387", font=("Segoe UI", 9))
+        self.simple_text.tag_config("STEP_INFO", foreground="#cad3f5", font=("Segoe UI", 9))
+        self.simple_text.tag_config("SEPARATOR", foreground="#fab387", font=("Segoe UI", 9, "bold"))
 
-        self.log_text = scrolledtext.ScrolledText(
-            log_frame,
+        # Tab 2: Log Chi Tiết (Debug)
+        self.tab_debug = tk.Frame(self.notebook, bg="#181825")
+        self.notebook.add(self.tab_debug, text="🛠 Log Chi Tiết (Debug)")
+
+        t2_toolbar = tk.Frame(self.tab_debug, bg="#181825", pady=4)
+        t2_toolbar.pack(fill="x")
+
+        tk.Checkbutton(
+            t2_toolbar,
+            text="🧹 Tự xóa log (60s)",
+            variable=self.auto_clear_debug,
+            font=("Segoe UI", 8),
+            fg="#a6adc8",
+            bg="#181825",
+            activebackground="#181825",
+            selectcolor="#1e1e2e"
+        ).pack(side="left")
+
+        self.copy_status_lbl = tk.Label(t2_toolbar, text="", font=("Segoe UI", 8, "bold"), fg="#a6da95", bg="#181825")
+        self.copy_status_lbl.pack(side="left", padx=10)
+
+        tk.Button(
+            t2_toolbar,
+            text="📋 Copy Toàn Bộ Log",
+            font=("Segoe UI", 8, "bold"),
+            bg="#8aadf4",
+            fg="#181825",
+            activebackground="#7dc4e4",
+            relief="flat",
+            cursor="hand2",
+            padx=10,
+            pady=1,
+            command=self._copy_debug_log
+        ).pack(side="right", padx=(5, 0))
+
+        tk.Button(
+            t2_toolbar,
+            text="🧹 Xóa Log",
+            font=("Segoe UI", 8),
+            bg="#313244",
+            fg="#cad3f5",
+            activebackground="#45475a",
+            relief="flat",
+            cursor="hand2",
+            padx=8,
+            pady=1,
+            command=self._clear_debug_log
+        ).pack(side="right")
+
+        self.debug_text = scrolledtext.ScrolledText(
+            self.tab_debug,
             bg="#1e1e2e",
             fg="#cdd6f4",
             insertbackground="#cdd6f4",
             font=("Consolas", 9),
             wrap="word",
             relief="flat",
-            bd=0
+            bd=0,
+            padx=6,
+            pady=6
         )
-        self.log_text.pack(fill="both", expand=True)
+        self.debug_text.pack(fill="both", expand=True)
 
-        # Text tags for colorful logging
-        self.log_text.tag_config("SUCCESS", foreground="#a6da95")
-        self.log_text.tag_config("WARN", foreground="#f9e2af")
-        self.log_text.tag_config("ALERT", foreground="#ed8796")
-        self.log_text.tag_config("INFO", foreground="#89b4fa")
+        # Tags styling for Tab 2
+        self.debug_text.tag_config("SUCCESS", foreground="#a6da95")
+        self.debug_text.tag_config("WARN", foreground="#f9e2af")
+        self.debug_text.tag_config("ALERT", foreground="#ed8796")
+        self.debug_text.tag_config("INFO", foreground="#89b4fa")
+        self.debug_text.tag_config("STATS", foreground="#cba6f7")
 
-        # Initial Welcome Log
-        self.on_engine_log("✨ Ứng dụng đã khởi động sẵn sàng!")
-        self.on_engine_log("💡 Bấm [F1] để bắt đầu, [F2] để dừng.")
-        self.on_engine_log("🎯 [BƯỚC 0 CHẨN ĐOÁN] Thấy dấu '!' trên đầu hãy bấm [F3] ngay để lưu dữ liệu!")
+        # Initial Welcome Logs
+        self.on_engine_log("✨ Ứng dụng đã sẵn sàng! Bấm [F1] để bắt đầu, [F2] để dừng.")
+        self.on_engine_log("🎯 [BƯỚC 0 CHẨN ĐOÁN] Thấy dấu '!' trên đầu hãy bấm [F3] để lưu clip.")
 
     def _toggle_topmost(self):
         self.root.attributes("-topmost", self.is_topmost.get())
 
-    def _schedule_auto_clear(self):
-        if self.auto_clear_log.get():
-            # Tránh xóa log đúng khoảnh khắc đang chờ cá cắn (STAGE_2) để ưu tiên 100% tài nguyên CPU & phản xạ
-            if self.engine.state == BotState.STAGE_2:
-                self.root.after(10000, self._schedule_auto_clear)
-                return
-            self._clear_log(auto=True)
-        self.root.after(60000, self._schedule_auto_clear)
+    def _copy_debug_log(self):
+        content = self.debug_text.get("1.0", tk.END).strip()
+        if content:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(content)
+            self.root.update()
+            self.copy_status_lbl.config(text="✅ Đã copy vào Clipboard!")
+            self.root.after(2500, lambda: self.copy_status_lbl.config(text=""))
+        else:
+            self.copy_status_lbl.config(text="⚠️ Log trống!")
+            self.root.after(2000, lambda: self.copy_status_lbl.config(text=""))
 
-    def _clear_log(self, auto: bool = False):
-        self.log_text.delete("1.0", tk.END)
-        if auto:
-            now = datetime.now().strftime("%H:%M:%S")
-            self.on_engine_log(f"[{now}] 🧹 [TỰ ĐỘNG DỌN DẸP] Đã xóa log định kỳ 60s. Bot vẫn đang chạy ngầm an toàn.")
+    def _clear_simple_log(self):
+        self.simple_text.delete("1.0", tk.END)
+
+    def _clear_debug_log(self):
+        self.debug_text.delete("1.0", tk.END)
+
+    def _schedule_auto_clear(self):
+        if self.engine.state != BotState.STAGE_2:
+            if self.auto_clear_simple.get():
+                self.simple_text.delete("1.0", tk.END)
+            if self.auto_clear_debug.get():
+                self.debug_text.delete("1.0", tk.END)
+                now = datetime.now().strftime("%H:%M:%S")
+                self.debug_text.insert(tk.END, f"[{now}] 🧹 [TỰ ĐỘNG DỌN DẸP] Đã xóa log định kỳ 60s.\n", "INFO")
+        self.root.after(60000, self._schedule_auto_clear)
 
     def _test_bot_vision(self):
         """Captures what the bot currently sees and reports exact match scores."""
@@ -271,7 +382,6 @@ class AutoFishingApp:
 
             templates = self.config.get("templates", {})
             thresholds = self.config.get("thresholds", {})
-
             m1 = self.engine.matcher.match_any(full_frame, templates.get("b1_quang_can"), threshold=thresholds.get("b1_quang_can", 0.70))
             m2 = self.engine.matcher.match_any(full_frame, templates.get("b2_giat_can"), threshold=thresholds.get("b2_giat_can", 0.70))
             m3 = self.engine.matcher.match_any(full_frame, templates.get("b3_bao_quan"), threshold=thresholds.get("b3_bao_quan", 0.70))
@@ -310,7 +420,7 @@ class AutoFishingApp:
         self.root.after(0, self._update_fish_count)
 
     def _update_fish_count(self):
-        self.counter_lbl.config(text=f"🐟 Số cá đã câu: {self.fish_count} con")
+        self.counter_lbl.config(text=f"🐟 Đã câu: {self.fish_count} con")
 
     def _update_state_ui(self, state: BotState):
         if state == BotState.IDLE or state == BotState.STOPPED:
@@ -324,9 +434,87 @@ class AutoFishingApp:
         elif state == BotState.STAGE_REPAIR:
             self.status_lbl.config(text="🔧 BƯỚC PHỤ: Sửa Cần Hỏng", fg="#cba6f7")
 
+    def _format_simple_log(self, msg: str):
+        """Translates raw engine logs into a clean, concise, human-friendly summary."""
+        # Skip purely technical/telemetry lines
+        if any(skip in msg for skip in ("⏱ [ĐO ĐẠC]", "└ tốn nhiều nhất", "[HIỆU NĂNG]", "record_full", "corpus/stuck", "tự động dọn dẹp")):
+            return None
+
+        # Format user-facing steps
+        if "Đã thấy nút Quăng Cần" in msg:
+            m = re.search(r"Click tại \((\d+),\s*(\d+)\)", msg)
+            coords = f" tại ({m.group(1)}, {m.group(2)})" if m else ""
+            return (f"🎣 [BƯỚC 1] Đã quăng cần câu{coords}", "STEP_CAST")
+
+        if "Chờ Dấu Chấm Than -> Giật Cần" in msg and "==>" in msg:
+            return ("🎯 [BƯỚC 2] Cần đã ở dưới nước, đang chờ cá cắn...", "STEP_WAIT")
+
+        if "Định vị nhân vật" in msg:
+            m = re.search(r"vùng đầu = \((\d+),\s*(\d+)", msg)
+            coords = f" tại ({m.group(1)}, {m.group(2)})" if m else ""
+            return (f"👤 Đã khóa vị trí nhân vật{coords}", "STEP_INFO")
+
+        if "PHÁT HIỆN DẤU CHẤM THAN" in msg:
+            m = re.search(r"tại (\d+),\s*(\d+)", msg)
+            coords = f" tại ({m.group(1)}, {m.group(2)})" if m else ""
+            return (f"⚡ [BƯỚC 2] CÁ CẮN! Phát hiện dấu '!'{coords}", "STEP_BITE")
+
+        if "KÍCH HOẠT: Giật cần" in msg:
+            m = re.search(r"tại nút bấm \((\d+),\s*(\d+)\)", msg)
+            coords = f" tại ({m.group(1)}, {m.group(2)})" if m else ""
+            return (f"💥 Đã bấm giật cần{coords}!", "STEP_BITE")
+
+        if "Lưu Cá Vào Balo" in msg and "==>" in msg:
+            return ("📦 [BƯỚC 3] Đang chờ kéo cá lên...", "STEP_WAIT")
+
+        if "Đã thấy nút Bảo Quản" in msg:
+            m = re.search(r"Click tại \((\d+),\s*(\d+)\)", msg)
+            coords = f" tại ({m.group(1)}, {m.group(2)})" if m else ""
+            return (f"📦 [BƯỚC 3] ĐÃ ẤN NÚT BẢO QUẢN{coords}! (+1 cá vào balo 🐟)", "STEP_KEEP")
+
+        if "HOÀN THÀNH 1 VÒNG CÂU" in msg:
+            sep = "━" * 46
+            return (f"{sep}\n✨ HOÀN THÀNH 1 VÒNG CÂU (Tổng câu: {self.fish_count} con cá 🐟)\n{sep}", "ROUND_COMPLETE")
+
+        if "TỰ SỬA TRẠNG THÁI" in msg:
+            if "Nút Giật Cần vẫn còn" in msg:
+                return ("🔄 [TỰ NẮN CHỈNH] Nút Giật Cần vẫn còn -> Tiếp tục canh cá...", "STEP_ADJUST")
+            if "Bảo quản" in msg:
+                return ("🔄 [TỰ NẮN CHỈNH] Đã thấy popup Bảo Quản -> Chuyển sang nhận cá...", "STEP_ADJUST")
+            return ("🔄 [TỰ NẮN CHỈNH] Nhận diện màn hình -> Bot tự thích ứng!", "STEP_ADJUST")
+
+        if "ĐỨT DÂY / HỤT CÁ" in msg:
+            return ("⚠️ Đứt dây câu / hụt cá -> Tự quăng cần mới.", "STEP_WARN")
+
+        if "CHẶN BONG BÓNG" in msg:
+            return ("🛡️ Đã phát hiện & bỏ qua bóng nhiệm vụ/mong muốn trên đầu.", "STEP_INFO")
+
+        if "Sửa Cần" in msg or "sửa cần" in msg.lower():
+            if "Đã định vị nút Sửa Cần" in msg:
+                return ("🔧 [SỬA CẦN] Đã bấm nút trả tiền sửa cần...", "STEP_REPAIR")
+            if "Đang chờ nút xanh OK" in msg:
+                return ("🔧 [SỬA CẦN] Đang chờ hoàn thành sửa chữa...", "STEP_REPAIR")
+            if "Đã định vị nút OK" in msg:
+                return ("🔧 [SỬA CẦN] Đã bấm nút OK xác nhận!", "STEP_REPAIR")
+            if "SỬA CẦN HOÀN THÀNH" in msg:
+                return ("✅ [SỬA CẦN] Cần câu đã sửa chữa hoàn tất! Tiếp tục câu.", "STEP_REPAIR")
+
+        if "BOT ĐÃ KHỞI ĐỘNG" in msg:
+            return ("🚀 BOT ĐÃ BẮT ĐẦU CHẠY (Nhấn F2 để dừng).", "ROUND_COMPLETE")
+
+        if "BOT ĐÃ DỪNG" in msg:
+            return ("⏹ BOT ĐÃ DỪNG LẠI (Nhấn F1 để bắt đầu lại).", "STEP_WARN")
+
+        if "KẸT >30s" in msg:
+            return ("⚠️ Cảnh báo: Kẹt quá 30s! Bot đã lưu ảnh bằng chứng.", "STEP_WARN")
+
+        return None
+
     def _process_log_queue(self):
         while not self.log_queue.empty():
             msg = self.log_queue.get_nowait()
+
+            # 1. Always append to Debug Log (Tab 2)
             tag = None
             if "PHÁT HIỆN" in msg or "HOÀN THÀNH" in msg or "✅" in msg:
                 tag = "SUCCESS"
@@ -334,21 +522,34 @@ class AutoFishingApp:
                 tag = "WARN"
             elif "LỖI" in msg or "⏹" in msg:
                 tag = "ALERT"
-            elif "🔍" in msg or "🚀" in msg or "🎣" in msg or "🔧" in msg:
+            elif "📊" in msg:
+                tag = "STATS"
+            elif "🔍" in msg or "🚀" in msg or "🎣" in msg or "🔧" in msg or "🔄" in msg:
                 tag = "INFO"
 
-            self.log_text.insert(tk.END, msg + "\n", tag)
-            self.log_text.see(tk.END)
+            self.debug_text.insert(tk.END, msg + "\n", tag)
+            self.debug_text.see(tk.END)
 
-        # Buffer cap: Keep at most 200 lines to prevent memory bloat & sluggish GUI
+            # 2. Parse & append to Simplified Status Log (Tab 1)
+            parsed = self._format_simple_log(msg)
+            if parsed is not None:
+                sim_text, sim_tag = parsed
+                self.simple_text.insert(tk.END, sim_text + "\n", sim_tag)
+                self.simple_text.see(tk.END)
+
+        # Buffer limits
         try:
-            line_count = int(self.log_text.index("end-1c").split(".")[0])
-            if line_count > 250:
-                self.log_text.delete("1.0", f"{line_count - 150}.0")
+            line_count_sim = int(self.simple_text.index("end-1c").split(".")[0])
+            if line_count_sim > 350:
+                self.simple_text.delete("1.0", f"{line_count_sim - 250}.0")
+
+            line_count_dbg = int(self.debug_text.index("end-1c").split(".")[0])
+            if line_count_dbg > 600:
+                self.debug_text.delete("1.0", f"{line_count_dbg - 400}.0")
         except Exception:
             pass
 
-        self.root.after(100, self._process_log_queue)
+        self.root.after(80, self._process_log_queue)
 
     def on_close(self):
         self.engine.stop()

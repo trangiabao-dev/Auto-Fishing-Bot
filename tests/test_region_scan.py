@@ -112,3 +112,26 @@ def test_watchdog_warns_once_per_stall_and_rearms_on_progress():
     w.note_progress("cast")
     c.t = 31 + 31
     assert w.warn_due(30) is True                       # re-armed by progress
+
+
+def test_keep_region_excludes_share_button(tmp_path):
+    d = tmp_path / "keep"
+    d.mkdir()
+    tpl = tpl_image(42, size=(80, 200))
+    cv2.imwrite(str(d / "baoquan.png"), tpl)
+
+    # Keep target limited to X in [0.65, 0.95] (x >= 1248 on 1920)
+    sc = RegionScanner([
+        ScanTarget("keep", str(d), (0.65, 0.65, 0.95, 0.95), 0.8)
+    ])
+
+    # 1. Share/Khoe button at x=1050, y=800 (Left side: outside ROI)
+    f_khoe = paste(make_frame(), tpl, 1050, 800)
+    assert not sc.scan(f_khoe)["keep"].found, "Khoe button at x=1050 must NOT be detected as keep"
+
+    # 2. Bao Quan button at x=1450, y=800 (Right side: inside ROI)
+    f_baoquan = paste(make_frame(), tpl, 1450, 800)
+    hit = sc.scan(f_baoquan)["keep"]
+    assert hit.found, "Bao quan button at x=1450 must be detected"
+    assert hit.x == 1450 and hit.y == 800
+

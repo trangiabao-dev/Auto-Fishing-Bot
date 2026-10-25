@@ -87,7 +87,7 @@ class BotEngine:
             ScanTarget("repair_btn",   tpls.get("b4_sua_can_btn", "assets/B4_SuaCan/button"),  (0.20, 0.40, 0.80, 0.90), ths.get("b4_sua_can", 0.70)),
             ScanTarget("done_title",   tpls.get("b4_hoan_thanh_title", "assets/B4_SuaCan/title_hoan_thanh"), (0.15, 0.05, 0.85, 0.85), ths.get("b4_sua_can", 0.70)),
             ScanTarget("ok",           tpls.get("b4_ok_btn", "assets/B4_SuaCan/btn_ok"),       (0.20, 0.40, 0.80, 0.90), ths.get("b4_btn_ok", 0.70)),
-            ScanTarget("keep",         tpls.get("b3_bao_quan", "assets/B3_BaoQuan"),          (0.45, 0.45, 1.00, 1.00), ths.get("b3_bao_quan", 0.70)),
+            ScanTarget("keep",         tpls.get("b3_bao_quan", "assets/B3_BaoQuan"),          (0.65, 0.65, 0.95, 0.95), ths.get("b3_bao_quan", 0.70)),
             ScanTarget("reel",         tpls.get("b2_giat_can", "assets/B2_DangCau/nut_giat_can.png"), (0.65, 0.55, 1.00, 1.00), ths.get("b2_giat_can", 0.70)),
             ScanTarget("cast",         tpls.get("b1_quang_can", "assets/B1_QuangCan"),         (0.65, 0.55, 1.00, 1.00), ths.get("b1_quang_can", 0.70)),
         ])

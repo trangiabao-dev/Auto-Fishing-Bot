@@ -15,6 +15,10 @@ from core.scale_aware import BiteTemplateBank, scaled_head_roi
 from core.static_veto import StaticVeto
 from core.outcome_recorder import attach_outcome_recorder
 from core.geometry import Rect
+from core.shape_veto import is_cloud_like
+from core.region_scan import RegionScanner, ScanTarget
+from core.progress_watchdog import ProgressWatchdog
+import os
 import cv2
 
 
@@ -73,6 +77,21 @@ class BotEngine:
         self.bite_bank = BiteTemplateBank(b2_cham_than_dir, reference_scale=1.0)
         self.static_veto = StaticVeto()
         self.stats["static_vetoed"] = 0
+        self.stats["shape_vetoed"] = 0
+
+        # P1c: Fast RegionScanner for fixed game UI modals/buttons & ProgressWatchdog
+        tpls = config.get("templates", {})
+        ths = config.get("thresholds", {})
+        self.scanner = RegionScanner([
+            ScanTarget("repair_title", tpls.get("b4_sua_can_title", "assets/B4_SuaCan/title"), (0.15, 0.05, 0.85, 0.85), ths.get("b4_sua_can", 0.70)),
+            ScanTarget("repair_btn",   tpls.get("b4_sua_can_btn", "assets/B4_SuaCan/button"),  (0.20, 0.40, 0.80, 0.90), ths.get("b4_sua_can", 0.70)),
+            ScanTarget("done_title",   tpls.get("b4_hoan_thanh_title", "assets/B4_SuaCan/title_hoan_thanh"), (0.15, 0.05, 0.85, 0.85), ths.get("b4_sua_can", 0.70)),
+            ScanTarget("ok",           tpls.get("b4_ok_btn", "assets/B4_SuaCan/btn_ok"),       (0.20, 0.40, 0.80, 0.90), ths.get("b4_btn_ok", 0.70)),
+            ScanTarget("keep",         tpls.get("b3_bao_quan", "assets/B3_BaoQuan"),          (0.45, 0.45, 1.00, 1.00), ths.get("b3_bao_quan", 0.70)),
+            ScanTarget("reel",         tpls.get("b2_giat_can", "assets/B2_DangCau/nut_giat_can.png"), (0.65, 0.55, 1.00, 1.00), ths.get("b2_giat_can", 0.70)),
+            ScanTarget("cast",         tpls.get("b1_quang_can", "assets/B1_QuangCan"),         (0.65, 0.55, 1.00, 1.00), ths.get("b1_quang_can", 0.70)),
+        ])
+        self.watchdog = ProgressWatchdog(timeout_s=90.0)
 
         # Cached last known match for img1 and head ROI
         self._last_img1_match: Optional[MatchResult] = None
@@ -181,8 +200,13 @@ class BotEngine:
         ok_tpl = self.config.get("templates", {}).get("b4_ok_btn", "assets/B4_SuaCan/btn_ok")
         thresh_ok = self.config.get("thresholds", {}).get("b4_btn_ok", 0.70)
 
-        # 1. Khớp mẫu template matching
-        m_tpl = self.matcher.match_any(frame, ok_tpl, threshold=thresh_ok, screen_offset=screen_offset)
+        # 1. Khớp mẫu template matching trong vùng dialog trung tâm (đơn tỉ lệ)
+        th, tw = frame.shape[:2]
+        c_y1, c_y2 = int(th * 0.40), int(th * 0.90)
+        c_x1, c_x2 = int(tw * 0.20), int(tw * 0.80)
+        c_roi = frame[c_y1:c_y2, c_x1:c_x2]
+        c_off = (screen_offset[0] + c_x1, screen_offset[1] + c_y1)
+        m_tpl = self.matcher.match_any(c_roi, ok_tpl, threshold=thresh_ok, screen_offset=c_off, multi_scale=False)
         if m_tpl.found:
             return m_tpl
 
@@ -248,9 +272,10 @@ class BotEngine:
         total = st["caught"] + st["missed_after_click"] + st["lost_before_bite"]
         rate = (100.0 * st["caught"] / total) if total else 0.0
         vetoed = st.get('static_vetoed', 0)
+        shape_v = st.get('shape_vetoed', 0)
         self._log(f"📊 [THỐNG KÊ] Thấy '!': {st['bite_seen']} | Dính cá: {st['caught']} | "
                   f"Giật nhưng hụt: {st['missed_after_click']} | Mất cá chưa '!': {st['lost_before_bite']} | "
-                  f"Chặn vật tĩnh: {vetoed} => tỉ lệ dính {rate:.0f}% ({st['caught']}/{total})")
+                  f"Chặn vật tĩnh: {vetoed} | Chặn bong bóng: {shape_v} => tỉ lệ dính {rate:.0f}% ({st['caught']}/{total})")
 
     def _log(self, message: str):
         now = datetime.now().strftime("%H:%M:%S")
@@ -272,63 +297,39 @@ class BotEngine:
 
     def _auto_detect_state(self) -> BotState:
         """
-        Tự động quét màn hình để xác định ngữ cảnh hiện tại:
-        1. Bảng 'Thông tin sửa chữa' đang mở -> Vào thẳng BƯỚC SỬA CẦN
-        2. Popup 'Bảo quản' đang mở -> Vào thẳng BƯỚC 3
-        3. Nút giật cần đang mở (đang trong lúc câu chờ cá) -> Vào thẳng BƯỚC 2
-        4. Nút quăng cần sẵn sàng -> Vào BƯỚC 1
+        Tự động quét màn hình theo vùng (RegionScanner) để xác định ngữ cảnh hiện tại (< 300ms):
+        1. Bảng 'Thông tin sửa chữa' / 'Sửa chữa hoàn thành' / Nút OK -> Vào thẳng BƯỚC SỬA CẦN
+        2. Popup 'Bảo quản' -> Vào thẳng BƯỚC 3
+        3. Nút giật cần -> Vào thẳng BƯỚC 2
+        4. Nút quăng cần -> Vào BƯỚC 1
         """
-        cfg = self.config
-        templates = cfg.get("templates", {})
-        thresholds = cfg.get("thresholds", {})
-
         full_frame, offset = self.capturer.capture(None)
 
-        # 1. Kiểm tra popup Sửa Cần (cả bảng Thông tin sửa chữa và bảng Sửa chữa hoàn thành)
-        sua_can_title = templates.get("b4_sua_can_title", "assets/B4_SuaCan/title")
-        hoan_thanh_title = templates.get("b4_hoan_thanh_title", "assets/B4_SuaCan/title_hoan_thanh")
-        ok_btn = templates.get("b4_ok_btn", "assets/B4_SuaCan/btn_ok")
-        thresh_repair = thresholds.get("b4_sua_can", 0.70)
-        thresh_ok = thresholds.get("b4_btn_ok", 0.70)
+        first = self.scanner.first_found(
+            full_frame,
+            ["repair_title", "done_title", "ok", "keep", "reel", "cast"],
+            origin=offset
+        )
 
-        m_rep = self.matcher.match_any(full_frame, sua_can_title, threshold=thresh_repair, screen_offset=offset)
-        m_ht = self.matcher.match_any(full_frame, hoan_thanh_title, threshold=thresh_repair, screen_offset=offset)
-        m_ok = self.matcher.match_any(full_frame, ok_btn, threshold=thresh_ok, screen_offset=offset)
+        if first is not None:
+            name, hit = first
+            if name in ("repair_title", "done_title", "ok"):
+                self._log(f"🔍 [NGỮ CẢNH] Phát hiện bảng sửa cần ({hit.score:.2f} - {hit.template})! Vào BƯỚC SỬA CẦN.")
+                return BotState.STAGE_REPAIR
+            elif name == "keep":
+                self._log(f"🔍 [NGỮ CẢNH] Phát hiện popup 'Bảo quản' ({hit.score:.2f} - {hit.template})! Vào thẳng BƯỚC 3 (Lưu cá).")
+                return BotState.STAGE_3
+            elif name == "reel":
+                self._last_img1_match = MatchResult(found=True, confidence=hit.score, x=hit.x, y=hit.y, w=hit.w, h=hit.h, template_name=hit.template)
+                self._log(f"🔍 [NGỮ CẢNH] Phát hiện đang câu cá dở dang (nút giật cần: {hit.score:.2f})! Vào thẳng BƯỚC 2 (Chờ cá cắn).")
+                return BotState.STAGE_2
+            elif name == "cast":
+                self._last_img1_match = MatchResult(found=True, confidence=hit.score, x=hit.x, y=hit.y, w=hit.w, h=hit.h, template_name=hit.template)
+                self._log(f"🔍 [NGỮ CẢNH] Phát hiện nút quăng cần sẵn sàng ({hit.score:.2f} - {hit.template})! Vào BƯỚC 1 (Quăng cần).")
+                return BotState.STAGE_1
 
-        if m_rep.found or m_ht.found or m_ok.found:
-            detected_tag = (m_rep.template_name if m_rep.found
-                            else (m_ht.template_name if m_ht.found else m_ok.template_name))
-            best_conf = max(m_rep.confidence, m_ht.confidence, m_ok.confidence)
-            self._log(f"🔍 [NGỮ CẢNH] Phát hiện bảng sửa cần đang mở ({best_conf:.2f} - {detected_tag})! Vào BƯỚC SỬA CẦN.")
-            return BotState.STAGE_REPAIR
-
-        # 2. Kiểm tra popup Bảo Quản (BƯỚC 3)
-        img3_path = templates.get("b3_bao_quan") or templates.get("img3")
-        thresh3 = thresholds.get("b3_bao_quan") or thresholds.get("img3", 0.70)
-        m3 = self.matcher.match_any(full_frame, img3_path, threshold=thresh3, screen_offset=offset)
-        if m3.found:
-            self._log(f"🔍 [NGỮ CẢNH] Phát hiện popup 'Bảo quản' đang mở ({m3.confidence:.2f} - {m3.template_name})! Vào thẳng BƯỚC 3 (Lưu cá).")
-            return BotState.STAGE_3
-
-        # 3. Kiểm tra có đang câu dở dang không (BƯỚC 2: nút giật cần đang hiện)
-        img2_btn = templates.get("b2_giat_can") or templates.get("img2_btn")
-        thresh_btn = thresholds.get("b2_giat_can") or thresholds.get("img2_btn", 0.70)
-        m2 = self.matcher.match_any(full_frame, img2_btn, threshold=thresh_btn, screen_offset=offset)
-        if m2.found:
-            self._last_img1_match = m2
-            self._log(f"🔍 [NGỮ CẢNH] Phát hiện đang câu cá dở dang (nút giật cần hiện: {m2.confidence:.2f})! Vào thẳng BƯỚC 2 (Chờ cá cắn).")
-            return BotState.STAGE_2
-
-        # 4. Kiểm tra nút quăng cần (BƯỚC 1)
-        img1_path = templates.get("b1_quang_can") or templates.get("img1")
-        thresh1 = thresholds.get("b1_quang_can") or thresholds.get("img1", 0.70)
-        m1 = self.matcher.match_any(full_frame, img1_path, threshold=thresh1, screen_offset=offset)
-        if m1.found:
-            self._last_img1_match = m1
-            self._log(f"🔍 [NGỮ CẢNH] Phát hiện nút quăng cần sẵn sàng ({m1.confidence:.2f} - {m1.template_name})! Vào BƯỚC 1 (Quăng cần).")
-            return BotState.STAGE_1
-
-        self._log(f"🔍 [NGỮ CẢNH] Khởi động tuần tự: QuăngCần={m1.confidence:.2f}, GiậtCần={m2.confidence:.2f}, BảoQuản={m3.confidence:.2f}, SửaCần={m_rep.confidence:.2f}")
+        hits = self.scanner.scan(full_frame, origin=offset)
+        self._log(f"🔍 [NGỮ CẢNH] Khởi động tuần tự: QuăngCần={hits['cast'].score:.2f}, GiậtCần={hits['reel'].score:.2f}, BảoQuản={hits['keep'].score:.2f}, SửaCần={hits['repair_title'].score:.2f}")
         return BotState.STAGE_1
 
     def start(self):
@@ -419,6 +420,7 @@ class BotEngine:
                     match1 = self.matcher.match_any(action_frame, img1_path, threshold=thresh1, screen_offset=action_offset, multi_scale=use_multi)
 
                     if match1.found:
+                        self.watchdog.note_progress("cast")
                         self._last_img1_match = match1
                         cx, cy = self.matcher.get_random_click_point(match1, margin=margin)
                         self._log(f" -> Đã thấy nút Quăng Cần ({match1.template_name}, độ khớp {match1.confidence:.2f}). Click tại ({cx}, {cy})")
@@ -428,6 +430,25 @@ class BotEngine:
                         self._set_state(BotState.STAGE_2)
                         self._log(f"==> Chuyển sang {self.state.value}")
                         time.sleep(random.uniform(0.20, 0.35))  # Delay nhỏ để game bắt đầu quăng phao
+                        break
+
+                    # Watchdog kiểm tra kẹt
+                    if self.watchdog.warn_due(30):
+                        stuck_dir = os.path.join("corpus", "stuck")
+                        os.makedirs(stuck_dir, exist_ok=True)
+                        ts = datetime.now().strftime("%H%M%S")
+                        stuck_path = os.path.join(stuck_dir, f"{ts}.jpg")
+                        cv2.imwrite(stuck_path, frame_full)
+                        self._log(f"⚠️ [KẸT >30s] Bot chưa có tiến triển trong 30s (Quăng={match1.confidence:.2f})! Đã lưu ảnh hiện tại vào {stuck_path}")
+
+                    if self.watchdog.stalled():
+                        self._log("🚨 [KẸT >90s] Không có tiến triển trong 90s! Tự động dừng bot để bảo vệ an toàn.")
+                        try:
+                            import winsound
+                            winsound.Beep(1000, 600)
+                        except Exception:
+                            pass
+                        self.stop()
                         break
 
                     # 2. ƯU TIÊN SỐ 2 (Fallback): Chỉ khi không thấy nút Quăng Cần sau 0.6s mới kiểm tra bảng Sửa Cần
@@ -593,11 +614,17 @@ class BotEngine:
                                 self.stats["static_vetoed"] = self.stats.get("static_vetoed", 0) + 1
                                 self._log(f" -> [CHẶN VẬT TĨNH] Bỏ qua '{bm.name}' (khớp {bm.score:.2f}) tại ({gx}, {gy}) vì đã tồn tại từ {veto_res.ref_age:.1f}s trước (điểm cũ {veto_res.ref_score:.2f})")
                             else:
-                                match2 = MatchResult(found=True, confidence=bm.score, x=gx, y=gy,
-                                                     w=bm.w, h=bm.h, template_name=bm.name)
-                                if hasattr(self, "outcome_recorder") and self.outcome_recorder is not None:
-                                    self.outcome_recorder.note_hit(x=gx, y=gy, w=bm.w, h=bm.h,
-                                                                   score=round(bm.score, 3), template=bm.name)
+                                # P1d: Chặn bong bóng mong muốn/nhiệm vụ (cloud-like veto)
+                                cloud_res = is_cloud_like(frame, Rect(bm.x, bm.y, bm.w, bm.h))
+                                if cloud_res.cloud_like:
+                                    self.stats["shape_vetoed"] = self.stats.get("shape_vetoed", 0) + 1
+                                    self._log(f" -> [CHẶN BONG BÓNG] Bỏ qua bong bóng mong muốn/nhiệm vụ (đám mây {cloud_res.blob.w}x{cloud_res.blob.h}, aspect {cloud_res.aspect:.2f})")
+                                else:
+                                    match2 = MatchResult(found=True, confidence=bm.score, x=gx, y=gy,
+                                                         w=bm.w, h=bm.h, template_name=bm.name)
+                                    if hasattr(self, "outcome_recorder") and self.outcome_recorder is not None:
+                                        self.outcome_recorder.note_hit(x=gx, y=gy, w=bm.w, h=bm.h,
+                                                                       score=round(bm.score, 3), template=bm.name)
 
                     scan_t = time.time()
                     if last_scan_t is not None:
@@ -642,6 +669,7 @@ class BotEngine:
                         )
 
                     if target_match is not None and target_match.found:
+                        self.watchdog.note_progress("reel")
                         cx, cy = self.matcher.get_random_click_point(target_match, margin=margin)
                         self._log(f" -> KÍCH HOẠT: Giật cần câu tại nút bấm ({cx}, {cy})")
                         self.input_sim.click(cx, cy, hold_min_ms=hold_min, hold_max_ms=hold_max)
@@ -702,6 +730,7 @@ class BotEngine:
                     match3 = self.matcher.match_any(bq_roi, img3_path, threshold=thresh3, screen_offset=bq_offset, multi_scale=use_bq_multi)
 
                     if match3.found:
+                        self.watchdog.note_progress("keep")
                         cx, cy = self.matcher.get_random_click_point(match3, margin=margin)
                         self._log(f" -> Đã thấy nút Bảo Quản ({match3.template_name}, độ khớp {match3.confidence:.2f}). Click tại ({cx}, {cy})")
                         self.input_sim.click(cx, cy, hold_min_ms=hold_min, hold_max_ms=hold_max)
@@ -760,9 +789,8 @@ class BotEngine:
 
                 # Kiểm tra xem có đang ở sẵn Modal 2 ("Sửa chữa hoàn thành" với nút OK) hay không
                 frame_init, off_init = self.capturer.capture(None)
-                m_init_ht = self.matcher.match_any(frame_init, hoan_thanh_title, threshold=thresh_repair, screen_offset=off_init)
-                btn_init_ok = self._find_ok_button(frame_init, title_match=m_init_ht, screen_offset=off_init)
-                already_in_modal2 = (btn_init_ok is not None and btn_init_ok.found)
+                sc_init = self.scanner.scan(frame_init, origin=off_init, names=["done_title", "ok"])
+                already_in_modal2 = sc_init["done_title"].found or sc_init["ok"].found
 
                 repair_cash_clicked = already_in_modal2
                 if already_in_modal2:
@@ -779,16 +807,19 @@ class BotEngine:
 
                         frame_r, off_r = self.capturer.capture(None)
 
-                        # Kiểm tra nếu bảng đã chuyển sang 'Sửa chữa hoàn thành'
-                        m_ht_check = self.matcher.match_any(frame_r, hoan_thanh_title, threshold=thresh_repair, screen_offset=off_r)
-                        m_ok_check = self._find_ok_button(frame_r, title_match=m_ht_check, screen_offset=off_r)
-                        if m_ok_check is not None and m_ok_check.found:
+                        # Dùng RegionScanner để kiểm tra modal hoàn thành & nút sửa cần (~30ms)
+                        sc_hits = self.scanner.scan(frame_r, origin=off_r, names=["done_title", "ok", "repair_title", "repair_btn"])
+                        if sc_hits["done_title"].found or sc_hits["ok"].found:
                             self._log(" -> Đã phát hiện bảng 'Sửa chữa hoàn thành'. Chuyển ngay sang bước ấn OK...")
                             repair_cash_clicked = True
                             break
 
-                        m_title = self.matcher.match_any(frame_r, sua_can_title, threshold=thresh_repair, screen_offset=off_r)
-                        m_cash = self.matcher.match_any(frame_r, btn_sua_can, threshold=thresh_repair, screen_offset=off_r)
+                        m_title = MatchResult(found=sc_hits["repair_title"].found, confidence=sc_hits["repair_title"].score,
+                                              x=sc_hits["repair_title"].x - off_r[0], y=sc_hits["repair_title"].y - off_r[1],
+                                              w=sc_hits["repair_title"].w, h=sc_hits["repair_title"].h, template_name=sc_hits["repair_title"].template)
+                        m_cash = MatchResult(found=sc_hits["repair_btn"].found, confidence=sc_hits["repair_btn"].score,
+                                             x=sc_hits["repair_btn"].x - off_r[0], y=sc_hits["repair_btn"].y - off_r[1],
+                                             w=sc_hits["repair_btn"].w, h=sc_hits["repair_btn"].h, template_name=sc_hits["repair_btn"].template)
 
                         # Định vị toàn bộ bề mặt nút bấm màu xanh (bất chấp mệnh giá tiền)
                         full_btn = self._find_repair_button(frame_r, title_match=m_title, cash_match=m_cash)
@@ -817,14 +848,25 @@ class BotEngine:
                             break
 
                         frame_ok, off_ok = self.capturer.capture(None)
-                        m_title_ht = self.matcher.match_any(frame_ok, hoan_thanh_title, threshold=thresh_repair, screen_offset=off_ok)
-                        btn_ok_match = self._find_ok_button(frame_ok, title_match=m_title_ht, screen_offset=off_ok)
+                        sc_ok_hits = self.scanner.scan(frame_ok, origin=off_ok, names=["done_title", "ok"])
+
+                        btn_ok_match = None
+                        if sc_ok_hits["ok"].found:
+                            btn_ok_match = MatchResult(found=True, confidence=sc_ok_hits["ok"].score,
+                                                       x=sc_ok_hits["ok"].x, y=sc_ok_hits["ok"].y,
+                                                       w=sc_ok_hits["ok"].w, h=sc_ok_hits["ok"].h, template_name=sc_ok_hits["ok"].template)
+                        else:
+                            m_title_ht = MatchResult(found=sc_ok_hits["done_title"].found, confidence=sc_ok_hits["done_title"].score,
+                                                     x=sc_ok_hits["done_title"].x - off_ok[0], y=sc_ok_hits["done_title"].y - off_ok[1],
+                                                     w=sc_ok_hits["done_title"].w, h=sc_ok_hits["done_title"].h, template_name=sc_ok_hits["done_title"].template)
+                            btn_ok_match = self._find_ok_button(frame_ok, title_match=m_title_ht, screen_offset=off_ok)
 
                         if btn_ok_match is not None and btn_ok_match.found:
                             cx, cy = self.matcher.get_random_click_point(btn_ok_match, margin=10)
                             self._log(f" -> Đã định vị nút OK ({btn_ok_match.w}x{btn_ok_match.h}, {btn_ok_match.template_name}). Click ngẫu nhiên khắp nút tại ({cx}, {cy})")
                             self.input_sim.click(cx, cy, hold_min_ms=hold_min, hold_max_ms=hold_max)
                             ok_clicked = True
+                            self.watchdog.note_progress("repair-ok")
                             break
 
                         time.sleep(scan_interval)

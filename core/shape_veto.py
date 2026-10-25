@@ -33,7 +33,7 @@ class CloudResult:
     fill: Optional[float]       # blob area / bbox area
 
 
-def is_cloud_like(roi_bgr: np.ndarray, box: Rect, *, v_min: int = 200, s_max: int = 60, close: int = 7,
+def is_cloud_like(roi_bgr: np.ndarray, box: Rect, *, v_min: Optional[int] = None, s_max: int = 60, close: int = 7,
                   min_w_ratio: float = 0.6, max_aspect: float = 1.5, min_fill: float = 0.5) -> CloudResult:
     """`box`: the template hit, in the coordinates of `roi_bgr` (local, not screen)."""
     h, w = roi_bgr.shape[:2]
@@ -43,7 +43,15 @@ def is_cloud_like(roi_bgr: np.ndarray, box: Rect, *, v_min: int = 200, s_max: in
         return CloudResult(False, None, None, None)
     crop = roi_bgr[win.y:win.bottom, win.x:win.right]
     hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
-    mask = ((hsv[..., 2] >= v_min) & (hsv[..., 1] <= s_max)).astype(np.uint8)
+
+    # Adaptive brightness floor (day: ~200, night/rain: adapts to local peak V)
+    if v_min is None:
+        v_peak = int(hsv[..., 2].max())
+        eff_v_min = max(80, int(v_peak * 0.78))
+    else:
+        eff_v_min = v_min
+
+    mask = ((hsv[..., 2] >= eff_v_min) & (hsv[..., 1] <= s_max)).astype(np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close, close)))
     n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
     if n <= 1:
@@ -54,7 +62,10 @@ def is_cloud_like(roi_bgr: np.ndarray, box: Rect, *, v_min: int = 200, s_max: in
         return CloudResult(False, None, None, None)
     inside = labels[lb.y:lb.bottom, lb.x:lb.right]
     counts = np.bincount(inside[inside > 0].ravel(), minlength=n)
-    if counts.size == 0 or counts.max() < 0.25 * box.w * box.h:
+    
+    # Require at least 250 px or 15% of the hit box overlap
+    min_overlap = min(300, int(0.15 * box.w * box.h))
+    if counts.size == 0 or counts.max() < min_overlap:
         return CloudResult(False, None, None, None)          # no white blob under the hit
     i = int(counts.argmax())
     bx, by, bw, bh, area = (int(v) for v in stats[i])

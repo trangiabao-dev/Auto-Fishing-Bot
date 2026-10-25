@@ -35,6 +35,18 @@ class TestRealScreenshots:
         r = is_cloud_like(load("bang_pale_topdown.png"), Rect(45, 38, 10, 18))
         assert not r.cloud_like
 
+    def test_thought_bubble_at_dusk_leaked_in_real_run_is_now_vetoed(self):
+        img = load("bubble_dusk_leak.jpg")
+        r = is_cloud_like(img, Rect(16, 73, 79, 77))
+        assert r.cloud_like
+        assert 0.7 <= r.aspect <= 1.4
+
+    def test_thought_bubble_at_night_leaked_in_real_run_is_now_vetoed(self):
+        img = load("bubble_night_leak.jpg")
+        r = is_cloud_like(img, Rect(18, 70, 79, 77))
+        assert r.cloud_like
+        assert 0.7 <= r.aspect <= 1.4
+
 
 def scene(bg=(60, 120, 200), size=(260, 300)):
     return np.full((*size, 3), bg, np.uint8)

@@ -20,6 +20,7 @@ from core.region_scan import RegionScanner, ScanTarget
 from core.progress_watchdog import ProgressWatchdog
 from core.bite_detector import BiteDetector
 from core.bite_policy import TriggerPolicy
+from core.cast_button_guard import CastButtonGuard
 import os
 import cv2
 
@@ -102,6 +103,7 @@ class BotEngine:
             ScanTarget("cast",         tpls.get("b1_quang_can", "assets/B1_QuangCan"),         (0.65, 0.55, 1.00, 1.00), ths.get("b1_quang_can", 0.70)),
         ])
         self.watchdog = ProgressWatchdog(timeout_s=90.0)
+        self.cast_guard = CastButtonGuard()
 
         # Cached last known match for img1 and head ROI
         self._last_img1_match: Optional[MatchResult] = None
@@ -381,543 +383,557 @@ class BotEngine:
 
     def _run_loop(self):
         """Main State Machine Loop."""
-        cfg = self.config
-        templates = cfg.get("templates", {})
-        thresholds = cfg.get("thresholds", {})
-        regions = cfg.get("regions", {})
-        delays = cfg.get("delays", {})
+        try:
+            cfg = self.config
+            templates = cfg.get("templates", {})
+            thresholds = cfg.get("thresholds", {})
+            regions = cfg.get("regions", {})
+            delays = cfg.get("delays", {})
 
-        scan_interval = delays.get("scan_interval_ms", 100) / 1000.0
-        hold_min = delays.get("click_hold_duration_min_ms", 40)
-        hold_max = delays.get("click_hold_duration_max_ms", 90)
-        margin = delays.get("click_margin_px", 5)
+            scan_interval = delays.get("scan_interval_ms", 100) / 1000.0
+            hold_min = delays.get("click_hold_duration_min_ms", 40)
+            hold_max = delays.get("click_hold_duration_max_ms", 90)
+            margin = delays.get("click_margin_px", 5)
 
-        self._set_state(self._auto_detect_state())
+            self._set_state(self._auto_detect_state())
 
-        while not self._stop_event.is_set():
-            if self._pause_event.is_set():
-                time.sleep(0.1)
-                continue
+            while not self._stop_event.is_set():
+                if self._pause_event.is_set():
+                    time.sleep(0.1)
+                    continue
 
-            # ========================================================
-            # STAGE 1: Tìm nút Quăng Cần và Click (Fast Path)
-            # ========================================================
-            if self.state == BotState.STAGE_1:
-                self.plate_tracker.reset()
-                self._log(f"[{self.state.value}] Đang quét tìm nút Quăng Cần...")
-                img1_path = templates.get("b1_quang_can") or templates.get("img1")
-                thresh1 = thresholds.get("b1_quang_can") or thresholds.get("img1", 0.70)
+                # ========================================================
+                # STAGE 1: Tìm nút Quăng Cần và Click (Fast Path)
+                # ========================================================
+                if self.state == BotState.STAGE_1:
+                    # Duy trì điểm neo liên tục (Sticky Anchor), KHÔNG reset plate_tracker giữa các vòng câu
+                    self._log(f"[{self.state.value}] Đang quét tìm nút Quăng Cần...")
+                    img1_path = templates.get("b1_quang_can") or templates.get("img1")
+                    thresh1 = thresholds.get("b1_quang_can") or thresholds.get("img1", 0.70)
 
-                sua_can_title = templates.get("b4_sua_can_title", "assets/B4_SuaCan/title")
-                hoan_thanh_title = templates.get("b4_hoan_thanh_title", "assets/B4_SuaCan/title_hoan_thanh")
-                ok_btn = templates.get("b4_ok_btn", "assets/B4_SuaCan/btn_ok")
-                thresh_repair = thresholds.get("b4_sua_can", 0.70)
-                thresh_ok = thresholds.get("b4_btn_ok", 0.70)
+                    sua_can_title = templates.get("b4_sua_can_title", "assets/B4_SuaCan/title")
+                    hoan_thanh_title = templates.get("b4_hoan_thanh_title", "assets/B4_SuaCan/title_hoan_thanh")
+                    ok_btn = templates.get("b4_ok_btn", "assets/B4_SuaCan/btn_ok")
+                    thresh_repair = thresholds.get("b4_sua_can", 0.70)
+                    thresh_ok = thresholds.get("b4_btn_ok", 0.70)
 
-                stage1_start = time.time()
-                last_modal_check = 0.0
+                    stage1_start = time.time()
+                    last_modal_check = 0.0
 
-                while not self._stop_event.is_set() and not self._pause_event.is_set():
-                    frame_full, off_full = self.capturer.capture(None)
-                    now = time.time()
-                    elapsed_st1 = now - stage1_start
+                    while not self._stop_event.is_set() and not self._pause_event.is_set():
+                        frame_full, off_full = self.capturer.capture(None)
+                        now = time.time()
+                        elapsed_st1 = now - stage1_start
 
-                    # Sensory Closed-Loop: Quét toàn diện thực tế màn hình qua RegionScanner (<25ms)
-                    sc1 = self.scanner.scan(frame_full, origin=off_full)
+                        # Sensory Closed-Loop: Quét toàn diện thực tế màn hình qua RegionScanner (<25ms)
+                        sc1 = self.scanner.scan(frame_full, origin=off_full)
 
-                    # 1. ƯU TIÊN SỐ 1: Nút Quăng Cần sẵn sàng -> Click quăng cần
-                    if sc1["cast"].found:
-                        self.watchdog.note_progress("cast")
-                        match1 = MatchResult(found=True, confidence=sc1["cast"].score, x=sc1["cast"].x, y=sc1["cast"].y, w=sc1["cast"].w, h=sc1["cast"].h, template_name=sc1["cast"].template)
-                        self._last_img1_match = match1
-                        cx, cy = self.matcher.get_random_click_point(match1, margin=margin)
-                        self._log(f" -> Đã thấy nút Quăng Cần ({match1.template_name}, độ khớp {match1.confidence:.2f}). Click tại ({cx}, {cy})")
-                        self.input_sim.click(cx, cy, hold_min_ms=hold_min, hold_max_ms=hold_max)
+                        # 1. ƯU TIÊN SỐ 1: Nút Quăng Cần sẵn sàng -> Click quăng cần
+                        if sc1["cast"].found:
+                            cast_hit = sc1["cast"]
+                            cand_center = (cast_hit.x + cast_hit.w // 2, cast_hit.y + cast_hit.h // 2)
+                            verify_res = self.cast_guard.verify_candidate(cand_center, cast_hit.score)
+                            if not verify_res.valid:
+                                self._log(f"⚠️ [CHẶN CLICK NHẦM] Từ chối vị trí quăng cần tại {cand_center} ({verify_res.veto_reason})")
+                                time.sleep(0.04)
+                                continue
 
-                        self._set_state(BotState.STAGE_2)
-                        self._log(f"==> Chuyển sang {self.state.value}")
-                        time.sleep(random.uniform(0.20, 0.35))
-                        break
+                            self.watchdog.note_progress("cast")
+                            match1 = MatchResult(found=True, confidence=cast_hit.score, x=cast_hit.x, y=cast_hit.y, w=cast_hit.w, h=cast_hit.h, template_name=cast_hit.template)
+                            self._last_img1_match = match1
+                            self._log(f" -> Đã thấy nút Quăng Cần ({match1.template_name}, độ khớp {match1.confidence:.2f}). Bấm phím F để quăng cần (DirectInput, né chuột 100%)...")
+                            self.input_sim.press_key("f")
 
-                    # 2. ƯU TIÊN SỐ 2 (TỰ SỬA TRẠNG THÁI): Nút Giật Cần đang hiện -> Thực tế đang câu dở dang!
-                    if sc1["reel"].found:
-                        self._last_img1_match = MatchResult(found=True, confidence=sc1["reel"].score, x=sc1["reel"].x, y=sc1["reel"].y, w=sc1["reel"].w, h=sc1["reel"].h, template_name=sc1["reel"].template)
-                        self._log(f"🔄 [TỰ SỬA TRẠNG THÁI] Nút Giật Cần đang hiện ({sc1['reel'].score:.2f})! Màn hình báo đang câu cá -> Vào thẳng BƯỚC 2...")
-                        self._set_state(BotState.STAGE_2)
-                        break
+                            self._set_state(BotState.STAGE_2)
+                            self._log(f"==> Chuyển sang {self.state.value}")
+                            time.sleep(random.uniform(0.20, 0.35))
+                            break
 
-                    # 3. ƯU TIÊN SỐ 3 (TỰ SỬA TRẠNG THÁI): Popup Bảo Quản đang mở -> Đã có cá sẵn!
-                    if sc1["keep"].found:
-                        self._log(f"🔄 [TỰ SỬA TRẠNG THÁI] Popup 'Bảo quản' đang mở ({sc1['keep'].score:.2f})! -> Vào thẳng BƯỚC 3...")
-                        self._set_state(BotState.STAGE_3)
-                        break
+                        # 2. ƯU TIÊN SỐ 2 (TỰ SỬA TRẠNG THÁI): Nút Giật Cần đang hiện -> Thực tế đang câu dở dang!
+                        if sc1["reel"].found:
+                            self._last_img1_match = MatchResult(found=True, confidence=sc1["reel"].score, x=sc1["reel"].x, y=sc1["reel"].y, w=sc1["reel"].w, h=sc1["reel"].h, template_name=sc1["reel"].template)
+                            self._log(f"🔄 [TỰ SỬA TRẠNG THÁI] Nút Giật Cần đang hiện ({sc1['reel'].score:.2f})! Màn hình báo đang câu cá -> Vào thẳng BƯỚC 2...")
+                            self._set_state(BotState.STAGE_2)
+                            break
 
-                    # 4. ƯU TIÊN SỐ 4 (TỰ SỬA TRẠNG THÁI): Bảng Sửa Cần đang mở
-                    if sc1["repair_title"].found or sc1["done_title"].found or sc1["ok"].found:
-                        self._log("⚠️ [TỰ SỬA TRẠNG THÁI] Bảng sửa cần đang mở! -> Vào thẳng BƯỚC SỬA CẦN...")
-                        self._set_state(BotState.STAGE_REPAIR)
-                        break
+                        # 3. ƯU TIÊN SỐ 3 (TỰ SỬA TRẠNG THÁI): Popup Bảo Quản đang mở -> Đã có cá sẵn!
+                        if sc1["keep"].found:
+                            self._log(f"🔄 [TỰ SỬA TRẠNG THÁI] Popup 'Bảo quản' đang mở ({sc1['keep'].score:.2f})! -> Vào thẳng BƯỚC 3...")
+                            self._set_state(BotState.STAGE_3)
+                            break
 
-                    # Watchdog kiểm tra kẹt
-                    if self.watchdog.warn_due(30):
-                        stuck_dir = os.path.join("corpus", "stuck")
-                        os.makedirs(stuck_dir, exist_ok=True)
-                        ts = datetime.now().strftime("%H%M%S")
-                        stuck_path = os.path.join(stuck_dir, f"{ts}.jpg")
-                        cv2.imwrite(stuck_path, frame_full)
-                        self._log(f"⚠️ [KẸT >30s] Bot chưa có tiến triển trong 30s (Quăng={sc1['cast'].score:.2f})! Đã lưu ảnh hiện tại vào {stuck_path}")
+                        # 4. ƯU TIÊN SỐ 4 (TỰ SỬA TRẠNG THÁI): Bảng Sửa Cần đang mở
+                        if sc1["repair_title"].found or sc1["done_title"].found or sc1["ok"].found:
+                            self._log("⚠️ [TỰ SỬA TRẠNG THÁI] Bảng sửa cần đang mở! -> Vào thẳng BƯỚC SỬA CẦN...")
+                            self._set_state(BotState.STAGE_REPAIR)
+                            break
 
-                    if self.watchdog.stalled():
-                        self._log("🚨 [KẸT >90s] Không có tiến triển trong 90s! Tự động dừng bot để bảo vệ an toàn.")
-                        try:
-                            import winsound
-                            winsound.Beep(1000, 600)
-                        except Exception:
-                            pass
-                        self.stop()
-                        break
+                        # Watchdog kiểm tra kẹt
+                        if self.watchdog.warn_due(30):
+                            stuck_dir = os.path.join("corpus", "stuck")
+                            os.makedirs(stuck_dir, exist_ok=True)
+                            ts = datetime.now().strftime("%H%M%S")
+                            stuck_path = os.path.join(stuck_dir, f"{ts}.jpg")
+                            cv2.imwrite(stuck_path, frame_full)
+                            self._log(f"⚠️ [KẸT >30s] Bot chưa có tiến triển trong 30s (Quăng={sc1['cast'].score:.2f})! Đã lưu ảnh hiện tại vào {stuck_path}")
 
-                    # Tự phục hồi: Nếu tìm >3.5s chưa có kết quả, reset lại stage1_start
-                    if elapsed_st1 > 3.5:
-                        stage1_start = time.time()
+                        if self.watchdog.stalled():
+                            self._log("🚨 [KẸT >90s] Không có tiến triển trong 90s! Tự động dừng bot để bảo vệ an toàn.")
+                            try:
+                                import winsound
+                                winsound.Beep(1000, 600)
+                            except Exception:
+                                pass
+                            self.stop()
+                            break
 
-                    time.sleep(0.04)
+                        # Tự phục hồi: Nếu tìm >3.5s chưa có kết quả, reset lại stage1_start
+                        if elapsed_st1 > 3.5:
+                            stage1_start = time.time()
+
+                        time.sleep(0.04)
 
 
-            # ========================================================
-            # STAGE 2: Chờ Dấu Chấm Than xuất hiện trên đầu nhân vật -> Giật cần
-            # ========================================================
-            elif self.state == BotState.STAGE_2:
-                img2_path = templates.get("b2_cham_than") or templates.get("img2")
-                thresh2 = thresholds.get("b2_cham_than") or thresholds.get("img2", 0.72)
-                timeout_sec = delays.get("stage2_wait_timeout_sec", 120)
-                relocate_interval = 0.5  # seconds between re-locating the character during the wait
+                # ========================================================
+                # STAGE 2: Chờ Dấu Chấm Than xuất hiện trên đầu nhân vật -> Giật cần
+                # ========================================================
+                elif self.state == BotState.STAGE_2:
+                    img2_path = templates.get("b2_cham_than") or templates.get("img2")
+                    thresh2 = thresholds.get("b2_cham_than") or thresholds.get("img2", 0.72)
+                    timeout_sec = delays.get("stage2_wait_timeout_sec", 120)
+                    relocate_interval = 0.5  # seconds between re-locating the character during the wait
 
-                start_wait_time = time.time()
-                found_img2 = False
+                    start_wait_time = time.time()
+                    found_img2 = False
 
-                # The ROI is NEVER taken from a template-matching fallback. It is either located by the
-                # character's name (this cast) or the last ROI that was located the same way (seed).
-                effective_region = self._last_good_head_roi
-                last_locate_time = 0.0
-                last_warn_time = 0.0
-                last_repair_check = 0.0
-                last_roi_move_time = start_wait_time
+                    # The ROI is NEVER taken from a template-matching fallback. It is either located by the
+                    # character's name (this cast) or the last ROI that was located the same way (seed).
+                    effective_region = self._last_good_head_roi
+                    last_locate_time = 0.0
+                    last_warn_time = 0.0
+                    last_repair_check = 0.0
+                    last_roi_move_time = start_wait_time
 
-                # Reel button: a fixed UI element that is already on screen for the whole wait.
-                # LOCATE it now (argmax in the lower-right area, low floor) instead of re-detecting it
-                # after the bite, where a miss cost 0.8-0.9s (multi-scale search) - longer than the bite itself.
-                btn_path = templates.get("b2_giat_can") or templates.get("img2_btn") or templates.get("img1")
-                reel_floor = thresholds.get("b2_giat_can_locate", 0.40)
-                reel_match: Optional[MatchResult] = None
+                    # Reel button: a fixed UI element that is already on screen for the whole wait.
+                    # LOCATE it now (argmax in the lower-right area, low floor) instead of re-detecting it
+                    # after the bite, where a miss cost 0.8-0.9s (multi-scale search) - longer than the bite itself.
+                    btn_path = templates.get("b2_giat_can") or templates.get("img2_btn") or templates.get("img1")
+                    reel_floor = thresholds.get("b2_giat_can_locate", 0.40)
+                    reel_match: Optional[MatchResult] = None
 
-                self.static_veto.reset()
-                self.bite_detector.reset()
-                self.bite_policy.reset()
-                last_det_hit = None
-                self.recorder.begin_cast(effective_region, {"thresh2": thresh2})
-                self._log(f"[{self.state.value}] Đang canh chừng Dấu Chấm Than (tần số cao, tối đa {timeout_sec}s)...")
+                    self.static_veto.reset()
+                    self.bite_detector.reset()
+                    self.bite_policy.reset()
+                    last_det_hit = None
+                    self.recorder.begin_cast(effective_region, {"thresh2": thresh2})
+                    self._log(f"[{self.state.value}] Đang canh chừng Dấu Chấm Than (tần số cao, tối đa {timeout_sec}s)...")
 
-                fast_scan_interval = 0.03  # 30ms (~33 FPS) để phản xạ tức thì khi cá cắn
-                scan_count = 0
-                last_scan_t = None
-                max_scan_gap = 0.0  # watchdog: khoảng nghỉ dài nhất giữa 2 lần quét "!" (phải << 400ms)
-                while not self._stop_event.is_set() and not self._pause_event.is_set():
-                    # Kiểm tra timeout
-                    if (time.time() - start_wait_time) > timeout_sec:
-                        self._log(f"[HẾT GIỜ] Đã đợi {timeout_sec}s mà không thấy Dấu Chấm Than! Tự động kiểm tra lại màn hình...")
-                        self.recorder.dump("timeout")
-                        self._set_state(self._auto_detect_state())
-                        break
+                    fast_scan_interval = 0.03  # 30ms (~33 FPS) để phản xạ tức thì khi cá cắn
+                    scan_count = 0
+                    last_scan_t = None
+                    max_scan_gap = 0.0  # watchdog: khoảng nghỉ dài nhất giữa 2 lần quét "!" (phải << 400ms)
+                    while not self._stop_event.is_set() and not self._pause_event.is_set():
+                        # Kiểm tra timeout
+                        if (time.time() - start_wait_time) > timeout_sec:
+                            self._log(f"[HẾT GIỜ] Đã đợi {timeout_sec}s mà không thấy Dấu Chấm Than! Tự động kiểm tra lại màn hình...")
+                            self.recorder.dump("timeout")
+                            self._set_state(self._auto_detect_state())
+                            break
 
-                    # Re-locate the character every 0.5s: camera/character may move after the cast.
-                    now = time.time()
-                    if now - last_locate_time >= relocate_interval:
-                        last_locate_time = now
-                        full_frame, full_offset = self.capturer.capture(None)
+                        # Re-locate the character every 0.5s: camera/character may move after the cast.
+                        now = time.time()
+                        if now - last_locate_time >= relocate_interval:
+                            last_locate_time = now
+                            full_frame, full_offset = self.capturer.capture(None)
 
-                        # 1. Định vị nhân vật qua PlateTracker (P1a: hue-mask, blob-based, windowed)
-                        track_res = self.plate_tracker.update(full_frame, full_offset)
-                        if track_res.state == "LOST":
-                            self.static_veto.reset()
-                            self.bite_detector.reset()
-                        if track_res.ambiguous:
-                            self._log(" -> [CẢNH BÁO] Phát hiện nhiều người chơi có tên màu xanh tương tự. Giữ nguyên mục tiêu hiện tại.")
-                        loc = track_res.hit
-                        if loc is not None:
-                            # P1b: scaled_head_roi theo zoom của camera
-                            s_roi = scaled_head_roi(loc.plate, loc.scale)
-                            new_roi = self._clamp_region(s_roi.to_tuple(), full_frame, full_offset)
-                            moved = effective_region is None or abs(new_roi[0] - effective_region[0]) > 20 or abs(new_roi[1] - effective_region[1]) > 20
-                            if moved:
-                                self._log(f" -> Định vị nhân vật '{loc.name}' (độ khớp {loc.score:.2f}, scale {loc.scale:.2f}): vùng đầu = {new_roi}")
-                                last_roi_move_time = now
+                            # 1. Định vị nhân vật qua PlateTracker (P1a: hue-mask, blob-based, windowed)
+                            track_res = self.plate_tracker.update(full_frame, full_offset)
+                            if track_res.state == "LOST":
+                                self.static_veto.reset()
                                 self.bite_detector.reset()
-                            effective_region = self._last_good_head_roi = new_roi
+                            if track_res.ambiguous:
+                                self._log(" -> [CẢNH BÁO] Phát hiện nhiều người chơi có tên màu xanh tương tự. Giữ nguyên mục tiêu hiện tại.")
+                            loc = track_res.hit
+                            if loc is not None:
+                                # P1b: scaled_head_roi theo zoom của camera
+                                s_roi = scaled_head_roi(loc.plate, loc.scale, pad_x=25)
+                                new_roi = self._clamp_region(s_roi.to_tuple(), full_frame, full_offset)
+                                moved = effective_region is None or abs(new_roi[0] - effective_region[0]) > 20 or abs(new_roi[1] - effective_region[1]) > 20
+                                if moved:
+                                    self._log(f" -> Định vị nhân vật '{loc.name}' (độ khớp {loc.score:.2f}, scale {loc.scale:.2f}): vùng đầu = {new_roi}")
+                                    last_roi_move_time = now
+                                    self.bite_detector.reset()
+                                effective_region = self._last_good_head_roi = new_roi
 
-                        # 2. Định vị nút Giật Cần trong vùng thao tác (góc dưới bên phải)
-                        fh, fw = full_frame.shape[:2]
-                        rx, ry = int(fw * 0.65), int(fh * 0.55)
-                        action_roi = full_frame[ry:, rx:]
-                        action_offset = (full_offset[0] + rx, full_offset[1] + ry)
+                            # 2. Định vị nút Giật Cần trong vùng thao tác (góc dưới bên phải)
+                            fh, fw = full_frame.shape[:2]
+                            rx, ry = int(fw * 0.65), int(fh * 0.55)
+                            action_roi = full_frame[ry:, rx:]
+                            action_offset = (full_offset[0] + rx, full_offset[1] + ry)
 
-                        cand = self.matcher.match(action_roi, btn_path, threshold=reel_floor,
-                                                  screen_offset=action_offset,
-                                                  multi_scale=False)
-                        if cand.found and (reel_match is None or cand.confidence > reel_match.confidence):
-                            if reel_match is None or abs(cand.x - reel_match.x) > 10 or abs(cand.y - reel_match.y) > 10:
-                                self._log(f" -> Đã định vị nút Giật Cần tại ({cand.x}, {cand.y}) {cand.w}x{cand.h} (độ khớp {cand.confidence:.2f})")
-                            reel_match = cand
+                            cand = self.matcher.match(action_roi, btn_path, threshold=reel_floor,
+                                                      screen_offset=action_offset,
+                                                      multi_scale=False)
+                            if cand.found and (reel_match is None or cand.confidence > reel_match.confidence):
+                                if reel_match is None or abs(cand.x - reel_match.x) > 10 or abs(cand.y - reel_match.y) > 10:
+                                    self._log(f" -> Đã định vị nút Giật Cần tại ({cand.x}, {cand.y}) {cand.w}x{cand.h} (độ khớp {cand.confidence:.2f})")
+                                reel_match = cand
 
-                        # 3. Kiểm tra sự cố, mọi phép dò đều đơn tỉ lệ và đứng < 150ms (dấu '!' hiện >= 400ms).
-                        # Tín hiệu loại trừ lẫn nhau MẠNH là nút Quăng Cần: hiện (0.95) => cần KHÔNG ở dưới nước;
-                        # lúc đang câu nó chỉ đạt ~0.57. (Nút Giật Cần thì yếu: 0.47 khi vắng vs 0.54 khi có.)
-                        if (now - start_wait_time) > 2.0:
-                            img1_path = templates.get("b1_quang_can") or templates.get("img1")
-                            m_quang_st2 = self.matcher.match_any(action_roi, img1_path, threshold=thresholds.get("b1_quang_can", 0.72),
-                                                                 screen_offset=action_offset, multi_scale=False)
-                            if m_quang_st2.found:
-                                self.stats["lost_before_bite"] += 1
-                                self._log(f"⚠️ Cần câu bị giật lên lại / chưa vào câu (Nút Quăng Cần hiện lại, khớp {m_quang_st2.confidence:.2f})! Quay về BƯỚC 1 quăng lại...")
-                                self._log_stats()
-                                self._set_state(BotState.STAGE_1)
-                                break
-
-                            # Popup sửa cần (P1b Step D): chỉ quét VÙNG TRUNG TÂM (x 25-75%, y 15-60%) ~22% diện tích -> ~50ms
-                            if now - last_repair_check >= 3.0:
-                                last_repair_check = now
-                                fh_m, fw_m = full_frame.shape[:2]
-                                cx0, cy0 = int(fw_m * 0.25), int(fh_m * 0.15)
-                                cx1, cy1 = int(fw_m * 0.75), int(fh_m * 0.60)
-                                center_crop = full_frame[cy0:cy1, cx0:cx1]
-                                center_offset = (full_offset[0] + cx0, full_offset[1] + cy0)
-                                sua_can_title = templates.get("b4_sua_can_title", "assets/B4_SuaCan/title")
-                                thresh_repair = thresholds.get("b4_sua_can", 0.70)
-                                m_rep2 = self.matcher.match_any(center_crop, sua_can_title, threshold=thresh_repair,
-                                                                screen_offset=center_offset, multi_scale=False)
-                                if m_rep2.found:
-                                    self._log(f"⚠️ Cần câu bị hỏng (phát hiện bảng sửa cần khớp {m_rep2.confidence:.2f})! Vào bước sửa cần...")
-                                    self._set_state(BotState.STAGE_REPAIR)
+                            # 3. Kiểm tra sự cố, mọi phép dò đều đơn tỉ lệ và đứng < 150ms (dấu '!' hiện >= 400ms).
+                            # Tín hiệu loại trừ lẫn nhau MẠNH là nút Quăng Cần: hiện (0.95) => cần KHÔNG ở dưới nước;
+                            # lúc đang câu nó chỉ đạt ~0.57. (Nút Giật Cần thì yếu: 0.47 khi vắng vs 0.54 khi có.)
+                            if (now - start_wait_time) > 2.0:
+                                img1_path = templates.get("b1_quang_can") or templates.get("img1")
+                                m_quang_st2 = self.matcher.match_any(action_roi, img1_path, threshold=thresholds.get("b1_quang_can", 0.72),
+                                                                     screen_offset=action_offset, multi_scale=False)
+                                if m_quang_st2.found:
+                                    self.stats["lost_before_bite"] += 1
+                                    self._log(f"⚠️ Cần câu bị giật lên lại / chưa vào câu (Nút Quăng Cần hiện lại, khớp {m_quang_st2.confidence:.2f})! Quay về BƯỚC 1 quăng lại...")
+                                    self._log_stats()
+                                    self._set_state(BotState.STAGE_1)
                                     break
 
-                                # Popup Bảo Quản mở sẵn (trường hợp cá cắn tự động mà không thấy '!')
-                                sc_keep = self.scanner.scan(full_frame, origin=full_offset, names=["keep"])
-                                if sc_keep["keep"].found:
-                                    self._log(f"🔄 [TỰ SỬA TRẠNG THÁI] Popup 'Bảo quản' ({sc_keep['keep'].score:.2f}) đã mở sẵn! Vào thẳng BƯỚC 3...")
-                                    self._set_state(BotState.STAGE_3)
-                                    break
+                                # Popup sửa cần (P1b Step D): chỉ quét VÙNG TRUNG TÂM (x 25-75%, y 15-60%) ~22% diện tích -> ~50ms
+                                if now - last_repair_check >= 3.0:
+                                    last_repair_check = now
+                                    fh_m, fw_m = full_frame.shape[:2]
+                                    cx0, cy0 = int(fw_m * 0.25), int(fh_m * 0.15)
+                                    cx1, cy1 = int(fw_m * 0.75), int(fh_m * 0.60)
+                                    center_crop = full_frame[cy0:cy1, cx0:cx1]
+                                    center_offset = (full_offset[0] + cx0, full_offset[1] + cy0)
+                                    sua_can_title = templates.get("b4_sua_can_title", "assets/B4_SuaCan/title")
+                                    thresh_repair = thresholds.get("b4_sua_can", 0.70)
+                                    m_rep2 = self.matcher.match_any(center_crop, sua_can_title, threshold=thresh_repair,
+                                                                    screen_offset=center_offset, multi_scale=False)
+                                    if m_rep2.found:
+                                        self._log(f"⚠️ Cần câu bị hỏng (phát hiện bảng sửa cần khớp {m_rep2.confidence:.2f})! Vào bước sửa cần...")
+                                        self._set_state(BotState.STAGE_REPAIR)
+                                        break
 
-                    if effective_region is None:
-                        # Never guess: without a located character there is nothing meaningful to scan.
-                        if now - last_warn_time > 5.0:
-                            self._log(" -> [CẢNH BÁO] Chưa định vị được nhân vật (tên bị che hoặc ngoài màn hình). Đang thử lại...")
-                            last_warn_time = now
-                        time.sleep(fast_scan_interval)
-                        continue
+                                    # Popup Bảo Quản mở sẵn (trường hợp cá cắn tự động mà không thấy '!')
+                                    sc_keep = self.scanner.scan(full_frame, origin=full_offset, names=["keep"])
+                                    if sc_keep["keep"].found:
+                                        self._log(f"🔄 [TỰ SỬA TRẠNG THÁI] Popup 'Bảo quản' ({sc_keep['keep'].score:.2f}) đã mở sẵn! Vào thẳng BƯỚC 3...")
+                                        self._set_state(BotState.STAGE_3)
+                                        break
 
-                    frame, offset = self.capturer.capture(effective_region)
+                        if effective_region is None:
+                            # Never guess: without a located character there is nothing meaningful to scan.
+                            if now - last_warn_time > 5.0:
+                                self._log(" -> [CẢNH BÁO] Chưa định vị được nhân vật (tên bị che hoặc ngoài màn hình). Đang thử lại...")
+                                last_warn_time = now
+                            time.sleep(fast_scan_interval)
+                            continue
 
-                    # P1b Step C: StaticVeto quan sát mỗi nhịp quét
-                    self.static_veto.observe(frame, offset)
+                        frame, offset = self.capturer.capture(effective_region)
 
-                    # P2: Cho BiteDetector ăn mỗi khung hình (không phụ thuộc màu)
-                    t_det = time.time()
-                    det_raw = self.bite_detector.update(frame, t_det, scale=(loc.scale if loc is not None else None))
+                        # P1b Step C: StaticVeto quan sát mỗi nhịp quét
+                        self.static_veto.observe(frame, offset)
 
-                    # P1b Step B & C: Quét '!' theo scale của PlateTracker và kiểm tra StaticVeto
-                    match2 = MatchResult(found=False)
-                    if (now - start_wait_time) >= 1.5 and (now - last_roi_move_time) >= 0.6:
-                        scale = loc.scale if loc is not None else 1.0
-                        gray_strip = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                        bm = self.bite_bank.best_match(gray_strip, scale)
-                        if bm is not None and bm.score >= thresh2:
-                            # Guardrail B: Dấu '!' trong Play Together luôn là icon phát quang (V >= 135)
-                            # Bỏ qua vệt bùn tối / bóng râm / mặt nước ban đêm bị TM_CCOEFF_NORMED phóng đại
-                            patch_bgr = frame[bm.y:bm.y + bm.h, bm.x:bm.x + bm.w]
-                            if patch_bgr.size > 0:
-                                hsv_p = cv2.cvtColor(patch_bgr, cv2.COLOR_BGR2HSV)
-                                if int(hsv_p[:, :, 2].max()) < 135:
-                                    bm = None
-                            if bm is not None:
-                                gx, gy = offset[0] + bm.x, offset[1] + bm.y
-                                veto_res = self.static_veto.is_static(Rect(gx, gy, bm.w, bm.h), bm.score, bm.template)
-                                if veto_res.static:
-                                    self.stats["static_vetoed"] = self.stats.get("static_vetoed", 0) + 1
-                                    self._log(f" -> [CHẶN VẬT TĨNH] Bỏ qua '{bm.name}' (khớp {bm.score:.2f}) tại ({gx}, {gy}) vì đã tồn tại từ {veto_res.ref_age:.1f}s trước (điểm cũ {veto_res.ref_score:.2f})")
-                                else:
-                                    # P1d: Chặn bong bóng mong muốn/nhiệm vụ (cloud-like veto)
-                                    cloud_res = is_cloud_like(frame, Rect(bm.x, bm.y, bm.w, bm.h))
-                                    if cloud_res.cloud_like:
-                                        self.stats["shape_vetoed"] = self.stats.get("shape_vetoed", 0) + 1
-                                        self._log(f" -> [CHẶN BONG BÓNG] Bỏ qua bong bóng mong muốn/nhiệm vụ (đám mây {cloud_res.blob.w}x{cloud_res.blob.h}, aspect {cloud_res.aspect:.2f})")
-                                    else:
-                                        match2 = MatchResult(found=True, confidence=bm.score, x=gx, y=gy,
-                                                             w=bm.w, h=bm.h, template_name=bm.name)
-                                        if hasattr(self, "outcome_recorder") and self.outcome_recorder is not None:
-                                            self.outcome_recorder.note_hit(x=gx, y=gy, w=bm.w, h=bm.h,
-                                                                           score=round(bm.score, 3), template=bm.name)
+                        # P2: Cho BiteDetector ăn mỗi khung hình (không phụ thuộc màu)
+                        t_det = time.time()
+                        det_raw = self.bite_detector.update(frame, t_det, scale=(loc.scale if loc is not None else None))
 
-                    # P2: Quyết định kích hoạt giật cần qua TriggerPolicy (off | shadow | confirm | primary)
-                    det_hit = det_raw
-                    armed = (now - start_wait_time) >= 1.5 and (now - last_roi_move_time) >= 0.6
-                    if det_hit is not None and (not armed or is_cloud_like(
-                            frame, Rect(det_hit.x, det_hit.y, det_hit.w, det_hit.h)).cloud_like):
-                        det_hit = None
-                    if det_hit is not None:
-                        last_det_hit = det_hit
-                    t_now = time.time()
-                    self.bite_policy.note_detector(t_now, det_hit is not None)
-                    self.bite_policy.note_template(t_now, match2.found)
-                    if det_hit is not None and not match2.found:
-                        self._log(f" -> [SHADOW:{self.bite_policy.mode}] Detector thấy '!' mà template không thấy: "
-                                  f"tương phản {det_hit.contrast:.0f}, {det_hit.w}x{det_hit.h}, fill {det_hit.fill:.2f}")
-                    if self.bite_policy.should_reel(t_now):
-                        if not match2.found and last_det_hit is not None:
-                            d = last_det_hit
-                            match2 = MatchResult(found=True, confidence=1.0, x=offset[0] + d.x, y=offset[1] + d.y,
-                                                 w=d.w, h=d.h, template_name="bite_detector")
-                    else:
+                        # P1b Step B & C: Quét '!' theo scale của PlateTracker và kiểm tra StaticVeto
                         match2 = MatchResult(found=False)
+                        if (now - start_wait_time) >= 1.5 and (now - last_roi_move_time) >= 0.6:
+                            scale = loc.scale if loc is not None else 1.0
+                            gray_strip = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                            bm = self.bite_bank.best_match(gray_strip, scale)
+                            if bm is not None and bm.score >= thresh2:
+                                # Guardrail B: Dấu '!' trong Play Together luôn là icon phát quang (V >= 135)
+                                # Bỏ qua vệt bùn tối / bóng râm / mặt nước ban đêm bị TM_CCOEFF_NORMED phóng đại
+                                patch_bgr = frame[bm.y:bm.y + bm.h, bm.x:bm.x + bm.w]
+                                if patch_bgr.size > 0:
+                                    hsv_p = cv2.cvtColor(patch_bgr, cv2.COLOR_BGR2HSV)
+                                    if int(hsv_p[:, :, 2].max()) < 135:
+                                        bm = None
+                                if bm is not None:
+                                    gx, gy = offset[0] + bm.x, offset[1] + bm.y
+                                    veto_res = self.static_veto.is_static(Rect(gx, gy, bm.w, bm.h), bm.score, bm.template)
+                                    if veto_res.static:
+                                        self.stats["static_vetoed"] = self.stats.get("static_vetoed", 0) + 1
+                                        self._log(f" -> [CHẶN VẬT TĨNH] Bỏ qua '{bm.name}' (khớp {bm.score:.2f}) tại ({gx}, {gy}) vì đã tồn tại từ {veto_res.ref_age:.1f}s trước (điểm cũ {veto_res.ref_score:.2f})")
+                                    else:
+                                        # P1d: Chặn bong bóng mong muốn/nhiệm vụ (cloud-like veto)
+                                        cloud_res = is_cloud_like(frame, Rect(bm.x, bm.y, bm.w, bm.h))
+                                        if cloud_res.cloud_like:
+                                            self.stats["shape_vetoed"] = self.stats.get("shape_vetoed", 0) + 1
+                                            self._log(f" -> [CHẶN BONG BÓNG] Bỏ qua bong bóng mong muốn/nhiệm vụ (đám mây {cloud_res.blob.w}x{cloud_res.blob.h}, aspect {cloud_res.aspect:.2f})")
+                                        else:
+                                            match2 = MatchResult(found=True, confidence=bm.score, x=gx, y=gy,
+                                                                 w=bm.w, h=bm.h, template_name=bm.name)
+                                            if hasattr(self, "outcome_recorder") and self.outcome_recorder is not None:
+                                                self.outcome_recorder.note_hit(x=gx, y=gy, w=bm.w, h=bm.h,
+                                                                               score=round(bm.score, 3), template=bm.name)
 
-                    scan_t = time.time()
-                    if last_scan_t is not None:
-                        max_scan_gap = max(max_scan_gap, scan_t - last_scan_t)
-                    last_scan_t = scan_t
+                        # P2: Quyết định kích hoạt giật cần qua TriggerPolicy (off | shadow | confirm | primary)
+                        det_hit = det_raw
+                        armed = (now - start_wait_time) >= 1.5 and (now - last_roi_move_time) >= 0.6
+                        if det_hit is not None and (not armed or is_cloud_like(
+                                frame, Rect(det_hit.x, det_hit.y, det_hit.w, det_hit.h)).cloud_like):
+                            det_hit = None
+                        if det_hit is not None:
+                            last_det_hit = det_hit
+                        t_now = time.time()
+                        self.bite_policy.note_detector(t_now, det_hit is not None)
+                        self.bite_policy.note_template(t_now, match2.found)
+                        if det_hit is not None and not match2.found:
+                            self._log(f" -> [SHADOW:{self.bite_policy.mode}] Detector thấy '!' mà template không thấy: "
+                                      f"tương phản {det_hit.contrast:.0f}, {det_hit.w}x{det_hit.h}, fill {det_hit.fill:.2f}")
+                        if self.bite_policy.should_reel(t_now):
+                            if not match2.found and last_det_hit is not None:
+                                d = last_det_hit
+                                match2 = MatchResult(found=True, confidence=1.0, x=offset[0] + d.x, y=offset[1] + d.y,
+                                                     w=d.w, h=d.h, template_name="bite_detector")
+                        else:
+                            match2 = MatchResult(found=False)
 
-                    # --- Step 0 diagnostics: record what the bot sees, every frame ---
-                    self.recorder.record(frame, match2.confidence, match2.template_name)
-                    scan_count += 1
-                    if scan_count % 8 == 0:
-                        self.recorder.record_full(self.capturer.capture(None)[0])
-                    mark = self.recorder.consume_manual_request()
-                    if mark is not None:
-                        folder = self.recorder.dump("manual_f3", mark_time=mark)
-                        self._log(f" -> [F3] Đã lưu bằng chứng vào: {folder}")
+                        scan_t = time.time()
+                        if last_scan_t is not None:
+                            max_scan_gap = max(max_scan_gap, scan_t - last_scan_t)
+                        last_scan_t = scan_t
 
-                    if match2.found:
-                        self._reel_det_agreed = self.bite_policy.detector_recent(time.time())
-                        self.stats["bite_seen"] += 1
-                        self._log(f" -> PHÁT HIỆN DẤU CHẤM THAN TRÊN ĐẦU! (Độ khớp: {match2.confidence:.2f} [{match2.template_name}] tại {match2.x}, {match2.y})")
-                        found_img2 = True
-                        break
+                        # --- Step 0 diagnostics: record what the bot sees, every frame ---
+                        self.recorder.record(frame, match2.confidence, match2.template_name)
+                        scan_count += 1
+                        if scan_count % 8 == 0:
+                            self.recorder.record_full(self.capturer.capture(None)[0])
+                        mark = self.recorder.consume_manual_request()
+                        if mark is not None:
+                            folder = self.recorder.dump("manual_f3", mark_time=mark)
+                            self._log(f" -> [F3] Đã lưu bằng chứng vào: {folder}")
 
-                    time.sleep(fast_scan_interval)
+                        if match2.found:
+                            self._reel_det_agreed = self.bite_policy.detector_recent(time.time())
+                            self.stats["bite_seen"] += 1
+                            self._log(f" -> PHÁT HIỆN DẤU CHẤM THAN TRÊN ĐẦU! (Độ khớp: {match2.confidence:.2f} [{match2.template_name}] tại {match2.x}, {match2.y})")
+                            found_img2 = True
+                            break
 
-                if max_scan_gap > 0.25:
-                    self._log(f" -> [HIỆU NĂNG] Vòng quét '!' từng đứng {max_scan_gap*1000:.0f}ms (phải < 250ms, dấu '!' chỉ hiện 400-600ms)")
+                        time.sleep(fast_scan_interval)
 
-                if found_img2 and not self._stop_event.is_set():
-                    # Thực hiện hành động: Click vào nút giật cần (đã định vị sẵn trong lúc chờ -> phản xạ tức thì)
-                    target_match = reel_match
-                    if target_match is None and btn_path:
-                        # Fallback: tìm trong vùng thao tác góc dưới bên phải (chỉ single-scale)
-                        full_frame, full_offset = self.capturer.capture(None)
-                        fh, fw = full_frame.shape[:2]
-                        rx, ry = int(fw * 0.65), int(fh * 0.55)
-                        target_match = self.matcher.match(
-                            full_frame[ry:, rx:],
-                            btn_path,
-                            threshold=reel_floor,
-                            screen_offset=(full_offset[0] + rx, full_offset[1] + ry),
-                            multi_scale=False
-                        )
+                    if max_scan_gap > 0.25:
+                        self._log(f" -> [HIỆU NĂNG] Vòng quét '!' từng đứng {max_scan_gap*1000:.0f}ms (phải < 250ms, dấu '!' chỉ hiện 400-600ms)")
 
-                    if target_match is not None and target_match.found:
+                    if found_img2 and not self._stop_event.is_set():
+                        # Thực hiện hành động: Click vào nút giật cần (đã định vị sẵn trong lúc chờ -> phản xạ tức thì)
+                        target_match = reel_match
+                        if target_match is None and btn_path:
+                            # Fallback: tìm trong vùng thao tác góc dưới bên phải (chỉ single-scale)
+                            full_frame, full_offset = self.capturer.capture(None)
+                            fh, fw = full_frame.shape[:2]
+                            rx, ry = int(fw * 0.65), int(fh * 0.55)
+                            target_match = self.matcher.match(
+                                full_frame[ry:, rx:],
+                                btn_path,
+                                threshold=reel_floor,
+                                screen_offset=(full_offset[0] + rx, full_offset[1] + ry),
+                                multi_scale=False
+                            )
+
+                        # Khi đã thấy '!', phím F giật cần trực tiếp mà không cần chờ nút giật cần
                         self.watchdog.note_progress("reel")
-                        cx, cy = self.matcher.get_random_click_point(target_match, margin=margin)
-                        self._log(f" -> KÍCH HOẠT: Giật cần câu tại nút bấm ({cx}, {cy})")
-                        self.input_sim.click(cx, cy, hold_min_ms=hold_min, hold_max_ms=hold_max)
+                        self._log(" -> KÍCH HOẠT: Bấm phím F để giật cần câu tức thì (DirectInput, phản xạ 0ms, né chuột 100%)!")
+                        self.input_sim.press_key("f", hold_min_ms=30, hold_max_ms=60)
 
                         # Chuyển sang STAGE 3
                         self._set_state(BotState.STAGE_3)
                         self._log(f"==> Chuyển sang {self.state.value}")
-                    else:
-                        self._log("[CẢNH BÁO] Không tìm thấy nút giật cần! Tự kiểm tra lại màn hình...")
-                        self._set_state(self._auto_detect_state())
 
-            # ========================================================
-            # STAGE 3: Chờ kết quả -> Tìm và click nút Bảo Quản hoặc phục hồi (Fast Path)
-            # ========================================================
-            elif self.state == BotState.STAGE_3:
-                wait_sec = delays.get("stage3_wait_delay_sec", 0.0)
-                if wait_sec > 0:
-                    self._log(f"[{self.state.value}] Nghỉ {wait_sec}s trước khi quét kết quả...")
-                    if not self._sleep_with_check(wait_sec):
-                        break
+                # ========================================================
+                # STAGE 3: Chờ kết quả -> Tìm và click nút Bảo Quản hoặc phục hồi (Fast Path)
+                # ========================================================
+                elif self.state == BotState.STAGE_3:
+                    wait_sec = delays.get("stage3_wait_delay_sec", 0.0)
+                    if wait_sec > 0:
+                        self._log(f"[{self.state.value}] Nghỉ {wait_sec}s trước khi quét kết quả...")
+                        if not self._sleep_with_check(wait_sec):
+                            break
 
-                img3_path = templates.get("b3_bao_quan") or templates.get("img3")
-                thresh3 = thresholds.get("b3_bao_quan") or thresholds.get("img3", 0.70)
+                    img3_path = templates.get("b3_bao_quan") or templates.get("img3")
+                    thresh3 = thresholds.get("b3_bao_quan") or thresholds.get("img3", 0.70)
 
-                img1_path = templates.get("b1_quang_can") or templates.get("img1")
-                thresh1 = thresholds.get("b1_quang_can") or thresholds.get("img1", 0.70)
+                    img1_path = templates.get("b1_quang_can") or templates.get("img1")
+                    thresh1 = thresholds.get("b1_quang_can") or thresholds.get("img1", 0.70)
 
-                sua_can_title = templates.get("b4_sua_can_title", "assets/B4_SuaCan/title")
-                hoan_thanh_title = templates.get("b4_hoan_thanh_title", "assets/B4_SuaCan/title_hoan_thanh")
-                ok_btn = templates.get("b4_ok_btn", "assets/B4_SuaCan/btn_ok")
-                thresh_repair = thresholds.get("b4_sua_can", 0.70)
-                thresh_ok = thresholds.get("b4_btn_ok", 0.70)
+                    sua_can_title = templates.get("b4_sua_can_title", "assets/B4_SuaCan/title")
+                    hoan_thanh_title = templates.get("b4_hoan_thanh_title", "assets/B4_SuaCan/title_hoan_thanh")
+                    ok_btn = templates.get("b4_ok_btn", "assets/B4_SuaCan/btn_ok")
+                    thresh_repair = thresholds.get("b4_sua_can", 0.70)
+                    thresh_ok = thresholds.get("b4_btn_ok", 0.70)
 
-                self._log(f"[{self.state.value}] Đang quét tìm nút Bảo Quản hoặc trạng thái phục hồi...")
-                timeout_stage3 = 10  # Đợi tối đa 10s (thay vì 25s mù quáng)
-                start_stage3 = time.time()
+                    self._log(f"[{self.state.value}] Đang quét tìm nút Bảo Quản hoặc trạng thái phục hồi...")
+                    timeout_stage3 = 10  # Đợi tối đa 10s (thay vì 25s mù quáng)
+                    start_stage3 = time.time()
 
-                while not self._stop_event.is_set() and not self._pause_event.is_set():
-                    now = time.time()
-                    elapsed_st3 = now - start_stage3
-                    if elapsed_st3 > timeout_stage3:
-                        self._log("[HẾT GIỜ] Không tìm thấy nút Bảo Quản sau 10s! Tự động kiểm tra lại màn hình...")
-                        self._set_state(self._auto_detect_state())
-                        break
-
-                    frame3, offset3 = self.capturer.capture(None)
-
-                    # Closed-Loop Perception: Quét đồng thời toàn bộ mục tiêu qua RegionScanner (<25ms)
-                    sc3 = self.scanner.scan(frame3, origin=offset3)
-
-                    # 1. ƯU TIÊN SỐ 1: Nút Bảo Quản (bắt được cá)
-                    if sc3["keep"].found:
-                        self.watchdog.note_progress("keep")
-                        match3 = MatchResult(found=True, confidence=sc3["keep"].score, x=sc3["keep"].x, y=sc3["keep"].y, w=sc3["keep"].w, h=sc3["keep"].h, template_name=sc3["keep"].template)
-                        cx, cy = self.matcher.get_random_click_point(match3, margin=margin)
-                        self._log(f" -> Đã thấy nút Bảo Quản ({sc3['keep'].template}, độ khớp {sc3['keep'].score:.2f}). Click tại ({cx}, {cy})")
-                        self.input_sim.click(cx, cy, hold_min_ms=hold_min, hold_max_ms=hold_max)
-                        self.stats["caught"] += 1
-                        self.stats["caught_det_agreed" if self._reel_det_agreed else "caught_det_missed"] += 1
-                        self._log_stats()
-                        if self.on_fish_caught:
-                            try:
-                                self.on_fish_caught()
-                            except Exception:
-                                pass
-                        time.sleep(random.uniform(0.20, 0.35))
-                        self._log("🔄 HOÀN THÀNH 1 VÒNG CÂU! Tự chuyển vòng mới...")
-                        self._set_state(BotState.STAGE_1)
-                        break
-
-                    # 2. ƯU TIÊN SỐ 2: Đứt dây / hụt cá -> Nút Quăng Cần xuất hiện lại
-                    if sc3["cast"].found:
-                        self.stats["missed_after_click"] += 1
-                        self.stats["miss_det_agreed" if self._reel_det_agreed else "miss_det_rejected"] += 1
-                        self._log(f"⚠️ [ĐỨT DÂY / HỤT CÁ] Nút Quăng Cần ({sc3['cast'].template}, {sc3['cast'].score:.2f}) đã mở lại! Quay về BƯỚC 1 quăng cần mới...")
-                        self._log_stats()
-                        self._set_state(BotState.STAGE_1)
-                        break
-
-                    # 3. ƯU TIÊN SỐ 3: Cần câu bị hỏng (Modal Sửa Cần xuất hiện)
-                    if sc3["repair_title"].found or sc3["done_title"].found or sc3["ok"].found:
-                        self._log("⚠️ Cần câu bị hỏng (phát hiện bảng sửa cần)! Vào bước sửa cần...")
-                        self._set_state(BotState.STAGE_REPAIR)
-                        break
-
-                    # 4. ƯU TIÊN SỐ 4 (CLOSED-LOOP RECOVERY CHỐNG KẸT): NÚT GIẬT CẦN VẪN CÒN TRÊN MÀN HÌNH!
-                    # Nếu đã vào BƯỚC 3 mà sau 0.8s nút Giật Cần vẫn còn, chứng tỏ thực tế nhân vật VẪN ĐANG CÂU CÁ.
-                    # Lập tức tự sửa trạng thái quay lại BƯỚC 2 tiếp tục canh cá, không được đứng chờ mù quáng!
-                    if elapsed_st3 > 0.8 and sc3["reel"].found:
-                        self._log(f"🔄 [TỰ SỬA TRẠNG THÁI] Nút Giật Cần vẫn còn ({sc3['reel'].score:.2f})! Màn hình chứng minh vẫn đang câu cá -> Quay lại BƯỚC 2 canh cá tiếp...")
-                        self._set_state(BotState.STAGE_2)
-                        break
-
-                    time.sleep(0.04)
-
-            # ========================================================
-            # STAGE REPAIR: Sửa cần câu bị hỏng (2 giai đoạn: Bấm Tiền -> Bấm OK)
-            # ========================================================
-            elif self.state == BotState.STAGE_REPAIR:
-                self._log("🔧 [BƯỚC PHỤ: Sửa Cần] Đang xử lý sửa cần câu tự động...")
-                btn_sua_can = templates.get("b4_sua_can_btn", "assets/B4_SuaCan/button")
-                sua_can_title = templates.get("b4_sua_can_title", "assets/B4_SuaCan/title")
-                hoan_thanh_title = templates.get("b4_hoan_thanh_title", "assets/B4_SuaCan/title_hoan_thanh")
-                thresh_repair = thresholds.get("b4_sua_can", 0.70)
-                thresh_ok = thresholds.get("b4_btn_ok", 0.70)
-
-                # Kiểm tra xem có đang ở sẵn Modal 2 ("Sửa chữa hoàn thành" với nút OK) hay không
-                frame_init, off_init = self.capturer.capture(None)
-                sc_init = self.scanner.scan(frame_init, origin=off_init, names=["done_title", "ok"])
-                already_in_modal2 = sc_init["done_title"].found or sc_init["ok"].found
-
-                repair_cash_clicked = already_in_modal2
-                if already_in_modal2:
-                    self._log(" -> Phát hiện bảng 'Sửa chữa hoàn thành' đã mở sẵn! Vào thẳng bước ấn OK.")
-
-                # GIAI ĐOẠN 1: Bấm nút Tiền Sao sửa cần (nếu chưa ở Modal 2)
-                if not repair_cash_clicked:
-                    start_repair = time.time()
                     while not self._stop_event.is_set() and not self._pause_event.is_set():
-                        if (time.time() - start_repair) > 8.0:
-                            self._log("[HẾT GIỜ] Không tìm thấy nút sửa cần trong 8s. Tự động kiểm tra lại màn hình...")
+                        now = time.time()
+                        elapsed_st3 = now - start_stage3
+                        if elapsed_st3 > timeout_stage3:
+                            self._log("[HẾT GIỜ] Không tìm thấy nút Bảo Quản sau 10s! Tự động kiểm tra lại màn hình...")
                             self._set_state(self._auto_detect_state())
                             break
 
-                        frame_r, off_r = self.capturer.capture(None)
+                        frame3, offset3 = self.capturer.capture(None)
 
-                        # Dùng RegionScanner để kiểm tra modal hoàn thành & nút sửa cần (~30ms)
-                        sc_hits = self.scanner.scan(frame_r, origin=off_r, names=["done_title", "ok", "repair_title", "repair_btn"])
-                        if sc_hits["done_title"].found or sc_hits["ok"].found:
-                            self._log(" -> Đã phát hiện bảng 'Sửa chữa hoàn thành'. Chuyển ngay sang bước ấn OK...")
-                            repair_cash_clicked = True
+                        # Closed-Loop Perception: Quét đồng thời toàn bộ mục tiêu qua RegionScanner (<25ms)
+                        sc3 = self.scanner.scan(frame3, origin=offset3)
+
+                        # 1. ƯU TIÊN SỐ 1: Nút Bảo Quản (bắt được cá)
+                        if sc3["keep"].found:
+                            self.watchdog.note_progress("keep")
+                            self._log(f" -> Đã thấy popup Bảo Quản ({sc3['keep'].template}, độ khớp {sc3['keep'].score:.2f}).")
+                            self._log(" -> [AN TOÀN TUYỆT ĐỐI] Gửi phím SPACE để nhận cá (triệt tiêu 100% rủi ro click nhầm Khoe hoặc Bán)...")
+                            self.input_sim.press_key("space")
+                            self.stats["caught"] += 1
+                            self.stats["caught_det_agreed" if self._reel_det_agreed else "caught_det_missed"] += 1
+                            self._log_stats()
+                            if self.on_fish_caught:
+                                try:
+                                    self.on_fish_caught()
+                                except Exception:
+                                    pass
+                            time.sleep(random.uniform(0.20, 0.35))
+                            self._log("🔄 HOÀN THÀNH 1 VÒNG CÂU! Tự chuyển vòng mới...")
+                            self._set_state(BotState.STAGE_1)
                             break
 
-                        m_title = MatchResult(found=sc_hits["repair_title"].found, confidence=sc_hits["repair_title"].score,
-                                              x=sc_hits["repair_title"].x - off_r[0], y=sc_hits["repair_title"].y - off_r[1],
-                                              w=sc_hits["repair_title"].w, h=sc_hits["repair_title"].h, template_name=sc_hits["repair_title"].template)
-                        m_cash = MatchResult(found=sc_hits["repair_btn"].found, confidence=sc_hits["repair_btn"].score,
-                                             x=sc_hits["repair_btn"].x - off_r[0], y=sc_hits["repair_btn"].y - off_r[1],
-                                             w=sc_hits["repair_btn"].w, h=sc_hits["repair_btn"].h, template_name=sc_hits["repair_btn"].template)
-
-                        # Định vị toàn bộ bề mặt nút bấm màu xanh (bất chấp mệnh giá tiền)
-                        full_btn = self._find_repair_button(frame_r, title_match=m_title, cash_match=m_cash)
-                        if full_btn is not None and full_btn.found:
-                            full_btn.x += off_r[0]
-                            full_btn.y += off_r[1]
-                            cx, cy = self.matcher.get_random_click_point(full_btn, margin=8)
-                            self._log(f" -> Đã định vị nút Sửa Cần ({full_btn.w}x{full_btn.h}). Click ngẫu nhiên khắp nút tại ({cx}, {cy})")
-                            self.input_sim.click(cx, cy, hold_min_ms=hold_min, hold_max_ms=hold_max)
-                            repair_cash_clicked = True
-                            time.sleep(random.uniform(0.6, 0.9))  # Chờ hiệu ứng hiện modal hoàn thành
+                        # 2. ƯU TIÊN SỐ 2: Đứt dây / hụt cá -> Nút Quăng Cần xuất hiện lại
+                        if sc3["cast"].found:
+                            self.stats["missed_after_click"] += 1
+                            self.stats["miss_det_agreed" if self._reel_det_agreed else "miss_det_rejected"] += 1
+                            self._log(f"⚠️ [ĐỨT DÂY / HỤT CÁ] Nút Quăng Cần ({sc3['cast'].template}, {sc3['cast'].score:.2f}) đã mở lại! Quay về BƯỚC 1 quăng cần mới...")
+                            self._log_stats()
+                            self._set_state(BotState.STAGE_1)
                             break
 
-                        time.sleep(scan_interval)
-
-                # GIAI ĐOẠN 2: Bấm nút xanh OK xác nhận hoàn thành sửa cần
-                if repair_cash_clicked and not self._stop_event.is_set() and not self._pause_event.is_set():
-                    self._log(" -> Đang chờ nút xanh OK ('Sửa chữa hoàn thành')...")
-                    start_ok = time.time()
-                    ok_clicked = False
-
-                    while not self._stop_event.is_set() and not self._pause_event.is_set():
-                        if (time.time() - start_ok) > 8.0:
-                            self._log("[HẾT GIỜ] Không tìm thấy nút OK trong 8s. Tự động kiểm tra lại màn hình...")
-                            self._set_state(self._auto_detect_state())
+                        # 3. ƯU TIÊN SỐ 3: Cần câu bị hỏng (Modal Sửa Cần xuất hiện)
+                        if sc3["repair_title"].found or sc3["done_title"].found or sc3["ok"].found:
+                            self._log("⚠️ Cần câu bị hỏng (phát hiện bảng sửa cần)! Vào bước sửa cần...")
+                            self._set_state(BotState.STAGE_REPAIR)
                             break
 
-                        frame_ok, off_ok = self.capturer.capture(None)
-                        sc_ok_hits = self.scanner.scan(frame_ok, origin=off_ok, names=["done_title", "ok"])
-
-                        btn_ok_match = None
-                        if sc_ok_hits["ok"].found:
-                            btn_ok_match = MatchResult(found=True, confidence=sc_ok_hits["ok"].score,
-                                                       x=sc_ok_hits["ok"].x, y=sc_ok_hits["ok"].y,
-                                                       w=sc_ok_hits["ok"].w, h=sc_ok_hits["ok"].h, template_name=sc_ok_hits["ok"].template)
-                        else:
-                            m_title_ht = MatchResult(found=sc_ok_hits["done_title"].found, confidence=sc_ok_hits["done_title"].score,
-                                                     x=sc_ok_hits["done_title"].x - off_ok[0], y=sc_ok_hits["done_title"].y - off_ok[1],
-                                                     w=sc_ok_hits["done_title"].w, h=sc_ok_hits["done_title"].h, template_name=sc_ok_hits["done_title"].template)
-                            btn_ok_match = self._find_ok_button(frame_ok, title_match=m_title_ht, screen_offset=off_ok)
-
-                        if btn_ok_match is not None and btn_ok_match.found:
-                            cx, cy = self.matcher.get_random_click_point(btn_ok_match, margin=10)
-                            self._log(f" -> Đã định vị nút OK ({btn_ok_match.w}x{btn_ok_match.h}, {btn_ok_match.template_name}). Click ngẫu nhiên khắp nút tại ({cx}, {cy})")
-                            self.input_sim.click(cx, cy, hold_min_ms=hold_min, hold_max_ms=hold_max)
-                            ok_clicked = True
-                            self.watchdog.note_progress("repair-ok")
+                        # 4. ƯU TIÊN SỐ 4 (CLOSED-LOOP RECOVERY CHỐNG KẸT): NÚT GIẬT CẦN VẪN CÒN TRÊN MÀN HÌNH!
+                        # Nếu đã vào BƯỚC 3 mà sau 0.8s nút Giật Cần vẫn còn, chứng tỏ thực tế nhân vật VẪN ĐANG CÂU CÁ.
+                        # Lập tức tự sửa trạng thái quay lại BƯỚC 2 tiếp tục canh cá, không được đứng chờ mù quáng!
+                        if elapsed_st3 > 0.8 and sc3["reel"].found:
+                            self._log(f"🔄 [TỰ SỬA TRẠNG THÁI] Nút Giật Cần vẫn còn ({sc3['reel'].score:.2f})! Màn hình chứng minh vẫn đang câu cá -> Quay lại BƯỚC 2 canh cá tiếp...")
+                            self._set_state(BotState.STAGE_2)
                             break
 
-                        time.sleep(scan_interval)
+                        time.sleep(0.04)
 
-                    if ok_clicked:
-                        # Chờ modal đóng hoàn toàn
-                        time.sleep(random.uniform(0.8, 1.2))
-                        self._log("✅ SỬA CẦN HOÀN THÀNH VÀ ĐÃ BẤM OK! Quay lại BƯỚC 1 để tiếp tục quăng cần...")
-                        self._set_state(BotState.STAGE_1)
+                # ========================================================
+                # STAGE REPAIR: Sửa cần câu bị hỏng (2 giai đoạn: Bấm Tiền -> Bấm OK)
+                # ========================================================
+                elif self.state == BotState.STAGE_REPAIR:
+                    self._log("🔧 [BƯỚC PHỤ: Sửa Cần] Đang xử lý sửa cần câu tự động...")
+                    btn_sua_can = templates.get("b4_sua_can_btn", "assets/B4_SuaCan/button")
+                    sua_can_title = templates.get("b4_sua_can_title", "assets/B4_SuaCan/title")
+                    hoan_thanh_title = templates.get("b4_hoan_thanh_title", "assets/B4_SuaCan/title_hoan_thanh")
+                    thresh_repair = thresholds.get("b4_sua_can", 0.70)
+                    thresh_ok = thresholds.get("b4_btn_ok", 0.70)
 
-        self._log("Bot loop đã kết thúc an toàn.")
+                    # Kiểm tra xem có đang ở sẵn Modal 2 ("Sửa chữa hoàn thành" với nút OK) hay không
+                    frame_init, off_init = self.capturer.capture(None)
+                    sc_init = self.scanner.scan(frame_init, origin=off_init, names=["done_title", "ok"])
+                    already_in_modal2 = sc_init["done_title"].found or sc_init["ok"].found
+
+                    repair_cash_clicked = already_in_modal2
+                    if already_in_modal2:
+                        self._log(" -> Phát hiện bảng 'Sửa chữa hoàn thành' đã mở sẵn! Vào thẳng bước ấn OK.")
+
+                    # GIAI ĐOẠN 1: Bấm nút Tiền Sao sửa cần (nếu chưa ở Modal 2)
+                    if not repair_cash_clicked:
+                        start_repair = time.time()
+                        while not self._stop_event.is_set() and not self._pause_event.is_set():
+                            if (time.time() - start_repair) > 8.0:
+                                self._log("[HẾT GIỜ] Không tìm thấy nút sửa cần trong 8s. Tự động kiểm tra lại màn hình...")
+                                self._set_state(self._auto_detect_state())
+                                break
+
+                            frame_r, off_r = self.capturer.capture(None)
+
+                            # Dùng RegionScanner để kiểm tra modal hoàn thành & nút sửa cần (~30ms)
+                            sc_hits = self.scanner.scan(frame_r, origin=off_r, names=["done_title", "ok", "repair_title", "repair_btn"])
+                            if sc_hits["done_title"].found or sc_hits["ok"].found:
+                                self._log(" -> Đã phát hiện bảng 'Sửa chữa hoàn thành'. Chuyển ngay sang bước ấn OK...")
+                                repair_cash_clicked = True
+                                break
+
+                            m_title = MatchResult(found=sc_hits["repair_title"].found, confidence=sc_hits["repair_title"].score,
+                                                  x=sc_hits["repair_title"].x - off_r[0], y=sc_hits["repair_title"].y - off_r[1],
+                                                  w=sc_hits["repair_title"].w, h=sc_hits["repair_title"].h, template_name=sc_hits["repair_title"].template)
+                            m_cash = MatchResult(found=sc_hits["repair_btn"].found, confidence=sc_hits["repair_btn"].score,
+                                                 x=sc_hits["repair_btn"].x - off_r[0], y=sc_hits["repair_btn"].y - off_r[1],
+                                                 w=sc_hits["repair_btn"].w, h=sc_hits["repair_btn"].h, template_name=sc_hits["repair_btn"].template)
+
+                            # Định vị toàn bộ bề mặt nút bấm màu xanh (bất chấp mệnh giá tiền)
+                            full_btn = self._find_repair_button(frame_r, title_match=m_title, cash_match=m_cash)
+                            if full_btn is not None and full_btn.found:
+                                full_btn.x += off_r[0]
+                                full_btn.y += off_r[1]
+                                cx, cy = self.matcher.get_random_click_point(full_btn, margin=8)
+                                self._log(f" -> Đã định vị nút Sửa Cần ({full_btn.w}x{full_btn.h}). Click ngẫu nhiên khắp nút tại ({cx}, {cy})")
+                                self.input_sim.click(cx, cy, hold_min_ms=hold_min, hold_max_ms=hold_max)
+                                repair_cash_clicked = True
+                                time.sleep(random.uniform(0.6, 0.9))  # Chờ hiệu ứng hiện modal hoàn thành
+                                break
+
+                            time.sleep(scan_interval)
+
+                    # GIAI ĐOẠN 2: Bấm nút xanh OK xác nhận hoàn thành sửa cần
+                    if repair_cash_clicked and not self._stop_event.is_set() and not self._pause_event.is_set():
+                        self._log(" -> Đang chờ nút xanh OK ('Sửa chữa hoàn thành')...")
+                        start_ok = time.time()
+                        ok_clicked = False
+
+                        while not self._stop_event.is_set() and not self._pause_event.is_set():
+                            if (time.time() - start_ok) > 8.0:
+                                self._log("[HẾT GIỜ] Không tìm thấy nút OK trong 8s. Tự động kiểm tra lại màn hình...")
+                                self._set_state(self._auto_detect_state())
+                                break
+
+                            frame_ok, off_ok = self.capturer.capture(None)
+                            sc_ok_hits = self.scanner.scan(frame_ok, origin=off_ok, names=["done_title", "ok"])
+
+                            btn_ok_match = None
+                            if sc_ok_hits["ok"].found:
+                                btn_ok_match = MatchResult(found=True, confidence=sc_ok_hits["ok"].score,
+                                                           x=sc_ok_hits["ok"].x, y=sc_ok_hits["ok"].y,
+                                                           w=sc_ok_hits["ok"].w, h=sc_ok_hits["ok"].h, template_name=sc_ok_hits["ok"].template)
+                            else:
+                                m_title_ht = MatchResult(found=sc_ok_hits["done_title"].found, confidence=sc_ok_hits["done_title"].score,
+                                                         x=sc_ok_hits["done_title"].x - off_ok[0], y=sc_ok_hits["done_title"].y - off_ok[1],
+                                                         w=sc_ok_hits["done_title"].w, h=sc_ok_hits["done_title"].h, template_name=sc_ok_hits["done_title"].template)
+                                btn_ok_match = self._find_ok_button(frame_ok, title_match=m_title_ht, screen_offset=off_ok)
+
+                            if btn_ok_match is not None and btn_ok_match.found:
+                                cx, cy = self.matcher.get_random_click_point(btn_ok_match, margin=10)
+                                self._log(f" -> Đã định vị nút OK ({btn_ok_match.w}x{btn_ok_match.h}, {btn_ok_match.template_name}). Click ngẫu nhiên khắp nút tại ({cx}, {cy})")
+                                self.input_sim.click(cx, cy, hold_min_ms=hold_min, hold_max_ms=hold_max)
+                                ok_clicked = True
+                                self.watchdog.note_progress("repair-ok")
+                                break
+
+                            time.sleep(scan_interval)
+
+                        if ok_clicked:
+                            # Chờ modal đóng hoàn toàn
+                            time.sleep(random.uniform(0.8, 1.2))
+                            self._log("✅ SỬA CẦN HOÀN THÀNH VÀ ĐÃ BẤM OK! Quay lại BƯỚC 1 để tiếp tục quăng cần...")
+                            self._set_state(BotState.STAGE_1)
+
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            self._log(f"🚨 [SỰ CỐ ĐỘT NGỘT] Luồng bot gặp lỗi nghiêm trọng: {e}\n{tb}")
+            if hasattr(self, "on_error") and callable(self.on_error):
+                try:
+                    self.on_error(str(e), tb)
+                except Exception:
+                    pass
+        finally:
+            self._set_state(BotState.STOPPED)
+            self._log("Bot loop đã kết thúc an toàn.")

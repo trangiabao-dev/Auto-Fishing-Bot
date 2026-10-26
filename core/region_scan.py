@@ -45,10 +45,12 @@ class ScanHit:
 def _load_gray(path_or_dir: str) -> List[Tuple[str, np.ndarray]]:
     if os.path.isdir(path_or_dir):
         paths = [os.path.join(path_or_dir, f) for f in sorted(os.listdir(path_or_dir))
-                 if f.lower().endswith((".png", ".jpg", ".jpeg", ".bmp"))]
+                 if f.lower().endswith((".png", ".jpg", ".jpeg", ".bmp"))
+                 and not f.lower().startswith(("negative_", "veto_"))]
     else:
         base, _ = os.path.splitext(path_or_dir)
-        paths = [p for p in [path_or_dir] + [base + e for e in (".png", ".jpg", ".jpeg", ".bmp")] if os.path.isfile(p)][:1]
+        paths = [p for p in [path_or_dir] + [base + e for e in (".png", ".jpg", ".jpeg", ".bmp")]
+                 if os.path.isfile(p) and not os.path.basename(p).lower().startswith(("negative_", "veto_"))][:1]
     out = []
     for p in paths:
         img = cv2.imread(p, cv2.IMREAD_GRAYSCALE)

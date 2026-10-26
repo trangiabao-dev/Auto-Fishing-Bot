@@ -307,3 +307,32 @@ class TemplateMatcher:
 
         cls._recent_clicks.append(best_pt)
         return best_pt
+
+    @classmethod
+    def get_safe_core_click_point(
+        cls,
+        match: MatchResult,
+        x_ratio_range: Tuple[float, float] = (0.15, 0.55),
+        y_ratio_range: Tuple[float, float] = (0.30, 0.70),
+    ) -> Tuple[int, int]:
+        """
+        Calculates a click point strictly within the safe core zone of a button.
+        For the 'Bảo Quản' button, this restricts clicks to [0.15*W, 0.55*W] and [0.30*H, 0.70*H],
+        leaving a generous safety margin (> 80px) away from the 'Khoe' button on the right
+        and > 50px away from the 'Bán tức thì' button on the left.
+        """
+        if not match.found:
+            raise ValueError("Cannot calculate safe click point for an unfound match.")
+
+        min_x = match.x + int(match.w * x_ratio_range[0])
+        max_x = match.x + int(match.w * x_ratio_range[1])
+        min_y = match.y + int(match.h * y_ratio_range[0])
+        max_y = match.y + int(match.h * y_ratio_range[1])
+
+        if min_x >= max_x or min_y >= max_y:
+            return match.center
+
+        cx = random.randint(min_x, max_x)
+        cy = random.randint(min_y, max_y)
+        cls._recent_clicks.append((cx, cy))
+        return (cx, cy)

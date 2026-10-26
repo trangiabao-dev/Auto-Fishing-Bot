@@ -40,7 +40,7 @@ class VetoResult:
 
 
 class StaticVeto:
-    def __init__(self, history_s: float = 3.0, min_age_s: float = 0.8, margin: float = 0.10, pad: int = 4,
+    def __init__(self, history_s: float = 3.0, min_age_s: float = 0.5, margin: float = 0.10, pad: int = 4,
                  max_refs: int = 4, clock: Callable[[], float] = time.perf_counter):
         self._history = history_s
         self._min_age = min_age_s

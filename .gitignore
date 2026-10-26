@@ -38,3 +38,7 @@ crop*.png
 test_*.png
 head_roi_test.png
 region_matched.png
+
+# Local AI Agent instructions (not committed to git)
+AGENTS.md
+

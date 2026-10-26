@@ -206,6 +206,7 @@ class TrackResult:
     hit: Optional[PlateHit]     # best knowledge of the plate (may be the last known one when stale)
     state: str                  # "TRACKING" | "STALE" | "LOST"
     ambiguous: bool = False     # a second, distant plate scored within `ambiguity_margin` (global search only)
+    motion: Tuple[int, int] = (0, 0)  # (dx, dy) movement in pixels since last frame (prevents crash on track_res.motion)
 
 
 class PlateTracker:
@@ -218,11 +219,16 @@ class PlateTracker:
 
     Anti-hijack rule: a candidate far from the last position replaces it only if it beats the nearest
     candidate by `jump_margin`. A stranger with a slightly higher score can no longer steal the lock.
+
+    Cold Start rule: in 3rd person perspective, the main player is centered at X ≈ 960 (on 1080p).
+    If multiple green name candidates appear at cold start, prioritize the candidate closest to the
+    horizontal center of the screen. Once locked, maintain the anchor across rounds (Sticky Anchor).
     """
 
     def __init__(self, locator: PlateLocator, *, margin: Tuple[int, int] = (360, 260),
                  lost_after_s: float = 1.0, global_interval_s: float = 0.5,
                  jump_margin: float = 0.12, ambiguity_margin: float = 0.05,
+                 center_x: Optional[float] = None, center_corridor: float = 180.0,
                  clock: Callable[[], float] = time.perf_counter):
         self._loc = locator
         self._margin = margin
@@ -230,6 +236,8 @@ class PlateTracker:
         self._global_every = global_interval_s
         self._jump_margin = jump_margin
         self._amb_margin = ambiguity_margin
+        self._center_x = center_x
+        self._center_corridor = center_corridor
         self._clock = clock
         self._last: Optional[PlateHit] = None
         self._last_seen = -1e9
@@ -241,28 +249,52 @@ class PlateTracker:
 
     def update(self, frame_bgr: np.ndarray, origin: Tuple[int, int] = (0, 0)) -> TrackResult:
         now = self._clock()
+        fh, fw = frame_bgr.shape[:2]
+        target_center_x = self._center_x if self._center_x is not None else (origin[0] + fw / 2.0)
+
+        # 1. WINDOWED TRACKING (Sticky Anchor active)
         if self._last is not None and now - self._last_seen < self._lost_after:
             window = self._last.text.inflate(*self._margin)
             hits = self._loc.candidates(frame_bgr, origin, window)
             chosen = self._choose(hits)
             if chosen is not None:
+                motion = (chosen.text.center.x - self._last.text.center.x,
+                          chosen.text.center.y - self._last.text.center.y)
                 self._last, self._last_seen = chosen, now
-                return TrackResult(chosen, "TRACKING")
-            return TrackResult(self._last, "STALE")
+                return TrackResult(chosen, "TRACKING", motion=motion)
+            return TrackResult(self._last, "STALE", motion=(0, 0))
 
+        # 2. GLOBAL SEARCH (Rate limited)
         if now - self._last_global < self._global_every:
-            return TrackResult(self._last, "LOST")
+            return TrackResult(self._last, "LOST", motion=(0, 0))
         self._last_global = now
         hits = self._loc.candidates(frame_bgr, origin)
         if not hits:
-            return TrackResult(self._last, "LOST")
+            return TrackResult(self._last, "LOST", motion=(0, 0))
+
         ambiguous = False
         if len(hits) > 1:
             far = [h for h in hits[1:] if _dist(h, hits[0]) > 0.5 * hits[0].plate.w]
             ambiguous = bool(far) and (hits[0].score - far[0].score) < self._amb_margin
-        chosen = self._choose(hits) if self._last is not None else hits[0]
+
+        # Pick candidate
+        if self._last is not None:
+            # Re-lock recovery: follow nearest to last anchor unless stranger is significantly better
+            chosen = self._choose(hits)
+        else:
+            # Cold Start: prioritize candidate closest to screen center (X ≈ 960 on 1080p)
+            corridor_hits = [h for h in hits if abs(h.text.center.x - target_center_x) <= self._center_corridor]
+            if corridor_hits:
+                chosen = min(corridor_hits, key=lambda h: abs(h.text.center.x - target_center_x))
+            else:
+                chosen = min(hits, key=lambda h: abs(h.text.center.x - target_center_x))
+
+        motion = (0, 0)
+        if self._last is not None and chosen is not None:
+            motion = (chosen.text.center.x - self._last.text.center.x,
+                      chosen.text.center.y - self._last.text.center.y)
         self._last, self._last_seen = chosen, now
-        return TrackResult(chosen, "TRACKING", ambiguous)
+        return TrackResult(chosen, "TRACKING", ambiguous=ambiguous, motion=motion)
 
     def _choose(self, hits: List[PlateHit]) -> Optional[PlateHit]:
         if not hits:

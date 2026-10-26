@@ -82,7 +82,7 @@ class BiteTemplateBank:
             self._cache[key] = t
         return t
 
-    def best_match(self, roi_gray: np.ndarray, plate_scale: float) -> Optional[BankMatch]:
+    def best_match(self, roi_gray: np.ndarray, plate_scale: float, min_contrast: int = 14) -> Optional[BankMatch]:
         """Best template at the zoom implied by the plate. `roi_gray` is single-channel."""
         s = clamp_scale(plate_scale) / self._ref
         best: Optional[BankMatch] = None
@@ -90,7 +90,14 @@ class BiteTemplateBank:
             t = self._scaled(name, img, s)
             if t is None or roi_gray.shape[0] < t.shape[0] or roi_gray.shape[1] < t.shape[1]:
                 continue
-            _, score, _, loc = cv2.minMaxLoc(cv2.matchTemplate(roi_gray, t, cv2.TM_CCOEFF_NORMED))
+            th, tw = t.shape[:2]
+            res = cv2.matchTemplate(roi_gray, t, cv2.TM_CCOEFF_NORMED)
+            _, score, _, loc = cv2.minMaxLoc(res)
             if np.isfinite(score) and (best is None or score > best.score):
-                best = BankMatch(float(score), int(loc[0]), int(loc[1]), t.shape[1], t.shape[0], name, t)
+                lx, ly = int(loc[0]), int(loc[1])
+                patch = roi_gray[ly:ly + th, lx:lx + tw]
+                # Reject flat regions where small variance inflates TM_CCOEFF_NORMED
+                if patch.size > 0 and int(patch.max()) - int(patch.min()) < min_contrast:
+                    continue
+                best = BankMatch(float(score), lx, ly, tw, th, name, t)
         return best

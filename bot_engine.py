@@ -489,6 +489,7 @@ class BotEngine:
                 last_locate_time = 0.0
                 last_warn_time = 0.0
                 last_repair_check = 0.0
+                last_roi_move_time = start_wait_time
 
                 # Reel button: a fixed UI element that is already on screen for the whole wait.
                 # LOCATE it now (argmax in the lower-right area, low floor) instead of re-detecting it
@@ -533,6 +534,7 @@ class BotEngine:
                             moved = effective_region is None or abs(new_roi[0] - effective_region[0]) > 20 or abs(new_roi[1] - effective_region[1]) > 20
                             if moved:
                                 self._log(f" -> Định vị nhân vật '{loc.name}' (độ khớp {loc.score:.2f}, scale {loc.scale:.2f}): vùng đầu = {new_roi}")
+                                last_roi_move_time = now
                             effective_region = self._last_good_head_roi = new_roi
 
                         # 2. Định vị nút Giật Cần trong vùng thao tác (góc dưới bên phải)
@@ -602,11 +604,18 @@ class BotEngine:
 
                     # P1b Step B & C: Quét '!' theo scale của PlateTracker và kiểm tra StaticVeto
                     match2 = MatchResult(found=False)
-                    if (now - start_wait_time) >= 1.5:
+                    if (now - start_wait_time) >= 1.5 and (now - last_roi_move_time) >= 0.6:
                         scale = loc.scale if loc is not None else 1.0
                         gray_strip = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                         bm = self.bite_bank.best_match(gray_strip, scale)
                         if bm is not None and bm.score >= thresh2:
+                            # Guardrail B: Dấu '!' trong Play Together luôn là icon phát quang (V >= 135)
+                            # Bỏ qua vệt bùn tối / bóng râm / mặt nước ban đêm bị TM_CCOEFF_NORMED phóng đại
+                            patch_bgr = frame[bm.y:bm.y + bm.h, bm.x:bm.x + bm.w]
+                            if patch_bgr.size > 0:
+                                hsv_p = cv2.cvtColor(patch_bgr, cv2.COLOR_BGR2HSV)
+                                if int(hsv_p[:, :, 2].max()) < 135:
+                                    continue
                             gx, gy = offset[0] + bm.x, offset[1] + bm.y
                             veto_res = self.static_veto.is_static(Rect(gx, gy, bm.w, bm.h), bm.score, bm.template)
                             if veto_res.static:

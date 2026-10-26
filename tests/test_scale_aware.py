@@ -78,3 +78,13 @@ class TestTemplateBank:
         b = BiteTemplateBank(str(tmp_path), reference_scale=0.5)
         roi, _ = render_bang(1.0)                          # now the plate says 1.0 -> templates must be doubled
         assert b.best_match(roi, 1.0).score > 0.85
+
+    def test_flat_low_contrast_noise_is_rejected(self, bank):
+        """Flat background with minor noise (std < 2, range < 10) must be rejected."""
+        # Simulated dark mud/water: mean 75, range 73..78
+        flat = np.full((120, 150), 75, dtype=np.uint8)
+        flat[10:30, 20:40] = 78
+        flat[40:60, 50:70] = 73
+        m = bank.best_match(flat, 1.0)
+        assert m is None, "Flat low-contrast region must be rejected"
+

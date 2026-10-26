@@ -18,6 +18,8 @@ from core.geometry import Rect
 from core.shape_veto import is_cloud_like
 from core.region_scan import RegionScanner, ScanTarget
 from core.progress_watchdog import ProgressWatchdog
+from core.bite_detector import BiteDetector
+from core.bite_policy import TriggerPolicy
 import os
 import cv2
 
@@ -78,6 +80,14 @@ class BotEngine:
         self.static_veto = StaticVeto()
         self.stats["static_vetoed"] = 0
         self.stats["shape_vetoed"] = 0
+
+        # P2: BiteDetector (không phụ thuộc màu) + chính sách triển khai: off | shadow | confirm | primary
+        bd_cfg = config.get("bite_detector", {})
+        self.bite_detector = BiteDetector(min_contrast=bd_cfg.get("min_contrast", 20.0))
+        self.bite_policy = TriggerPolicy(bd_cfg.get("mode", "shadow"), bd_cfg.get("confirm_window_s", 0.6))
+        self._reel_det_agreed = False
+        for key in ("caught_det_agreed", "caught_det_missed", "miss_det_agreed", "miss_det_rejected"):
+            self.stats[key] = 0
 
         # P1c: Fast RegionScanner for fixed game UI modals/buttons & ProgressWatchdog
         tpls = config.get("templates", {})
@@ -276,6 +286,9 @@ class BotEngine:
         self._log(f"📊 [THỐNG KÊ] Thấy '!': {st['bite_seen']} | Dính cá: {st['caught']} | "
                   f"Giật nhưng hụt: {st['missed_after_click']} | Mất cá chưa '!': {st['lost_before_bite']} | "
                   f"Chặn vật tĩnh: {vetoed} | Chặn bong bóng: {shape_v} => tỉ lệ dính {rate:.0f}% ({st['caught']}/{total})")
+        if hasattr(self, "bite_policy"):
+            self._log(f"🔬 [SHADOW:{self.bite_policy.mode}] Cá dính: detector đồng ý {st.get('caught_det_agreed', 0)}, bỏ sót {st.get('caught_det_missed', 0)} | "
+                      f"Giật hụt: detector cũng bắn {st.get('miss_det_agreed', 0)}, đã chặn được {st.get('miss_det_rejected', 0)}")
 
     def _log(self, message: str):
         now = datetime.now().strftime("%H:%M:%S")
@@ -499,6 +512,9 @@ class BotEngine:
                 reel_match: Optional[MatchResult] = None
 
                 self.static_veto.reset()
+                self.bite_detector.reset()
+                self.bite_policy.reset()
+                last_det_hit = None
                 self.recorder.begin_cast(effective_region, {"thresh2": thresh2})
                 self._log(f"[{self.state.value}] Đang canh chừng Dấu Chấm Than (tần số cao, tối đa {timeout_sec}s)...")
 
@@ -524,6 +540,7 @@ class BotEngine:
                         track_res = self.plate_tracker.update(full_frame, full_offset)
                         if track_res.state == "LOST":
                             self.static_veto.reset()
+                            self.bite_detector.reset()
                         if track_res.ambiguous:
                             self._log(" -> [CẢNH BÁO] Phát hiện nhiều người chơi có tên màu xanh tương tự. Giữ nguyên mục tiêu hiện tại.")
                         loc = track_res.hit
@@ -535,6 +552,7 @@ class BotEngine:
                             if moved:
                                 self._log(f" -> Định vị nhân vật '{loc.name}' (độ khớp {loc.score:.2f}, scale {loc.scale:.2f}): vùng đầu = {new_roi}")
                                 last_roi_move_time = now
+                                self.bite_detector.reset()
                             effective_region = self._last_good_head_roi = new_roi
 
                         # 2. Định vị nút Giật Cần trong vùng thao tác (góc dưới bên phải)
@@ -602,6 +620,10 @@ class BotEngine:
                     # P1b Step C: StaticVeto quan sát mỗi nhịp quét
                     self.static_veto.observe(frame, offset)
 
+                    # P2: Cho BiteDetector ăn mỗi khung hình (không phụ thuộc màu)
+                    t_det = time.time()
+                    det_raw = self.bite_detector.update(frame, t_det, scale=(loc.scale if loc is not None else None))
+
                     # P1b Step B & C: Quét '!' theo scale của PlateTracker và kiểm tra StaticVeto
                     match2 = MatchResult(found=False)
                     if (now - start_wait_time) >= 1.5 and (now - last_roi_move_time) >= 0.6:
@@ -615,24 +637,47 @@ class BotEngine:
                             if patch_bgr.size > 0:
                                 hsv_p = cv2.cvtColor(patch_bgr, cv2.COLOR_BGR2HSV)
                                 if int(hsv_p[:, :, 2].max()) < 135:
-                                    continue
-                            gx, gy = offset[0] + bm.x, offset[1] + bm.y
-                            veto_res = self.static_veto.is_static(Rect(gx, gy, bm.w, bm.h), bm.score, bm.template)
-                            if veto_res.static:
-                                self.stats["static_vetoed"] = self.stats.get("static_vetoed", 0) + 1
-                                self._log(f" -> [CHẶN VẬT TĨNH] Bỏ qua '{bm.name}' (khớp {bm.score:.2f}) tại ({gx}, {gy}) vì đã tồn tại từ {veto_res.ref_age:.1f}s trước (điểm cũ {veto_res.ref_score:.2f})")
-                            else:
-                                # P1d: Chặn bong bóng mong muốn/nhiệm vụ (cloud-like veto)
-                                cloud_res = is_cloud_like(frame, Rect(bm.x, bm.y, bm.w, bm.h))
-                                if cloud_res.cloud_like:
-                                    self.stats["shape_vetoed"] = self.stats.get("shape_vetoed", 0) + 1
-                                    self._log(f" -> [CHẶN BONG BÓNG] Bỏ qua bong bóng mong muốn/nhiệm vụ (đám mây {cloud_res.blob.w}x{cloud_res.blob.h}, aspect {cloud_res.aspect:.2f})")
+                                    bm = None
+                            if bm is not None:
+                                gx, gy = offset[0] + bm.x, offset[1] + bm.y
+                                veto_res = self.static_veto.is_static(Rect(gx, gy, bm.w, bm.h), bm.score, bm.template)
+                                if veto_res.static:
+                                    self.stats["static_vetoed"] = self.stats.get("static_vetoed", 0) + 1
+                                    self._log(f" -> [CHẶN VẬT TĨNH] Bỏ qua '{bm.name}' (khớp {bm.score:.2f}) tại ({gx}, {gy}) vì đã tồn tại từ {veto_res.ref_age:.1f}s trước (điểm cũ {veto_res.ref_score:.2f})")
                                 else:
-                                    match2 = MatchResult(found=True, confidence=bm.score, x=gx, y=gy,
-                                                         w=bm.w, h=bm.h, template_name=bm.name)
-                                    if hasattr(self, "outcome_recorder") and self.outcome_recorder is not None:
-                                        self.outcome_recorder.note_hit(x=gx, y=gy, w=bm.w, h=bm.h,
-                                                                       score=round(bm.score, 3), template=bm.name)
+                                    # P1d: Chặn bong bóng mong muốn/nhiệm vụ (cloud-like veto)
+                                    cloud_res = is_cloud_like(frame, Rect(bm.x, bm.y, bm.w, bm.h))
+                                    if cloud_res.cloud_like:
+                                        self.stats["shape_vetoed"] = self.stats.get("shape_vetoed", 0) + 1
+                                        self._log(f" -> [CHẶN BONG BÓNG] Bỏ qua bong bóng mong muốn/nhiệm vụ (đám mây {cloud_res.blob.w}x{cloud_res.blob.h}, aspect {cloud_res.aspect:.2f})")
+                                    else:
+                                        match2 = MatchResult(found=True, confidence=bm.score, x=gx, y=gy,
+                                                             w=bm.w, h=bm.h, template_name=bm.name)
+                                        if hasattr(self, "outcome_recorder") and self.outcome_recorder is not None:
+                                            self.outcome_recorder.note_hit(x=gx, y=gy, w=bm.w, h=bm.h,
+                                                                           score=round(bm.score, 3), template=bm.name)
+
+                    # P2: Quyết định kích hoạt giật cần qua TriggerPolicy (off | shadow | confirm | primary)
+                    det_hit = det_raw
+                    armed = (now - start_wait_time) >= 1.5 and (now - last_roi_move_time) >= 0.6
+                    if det_hit is not None and (not armed or is_cloud_like(
+                            frame, Rect(det_hit.x, det_hit.y, det_hit.w, det_hit.h)).cloud_like):
+                        det_hit = None
+                    if det_hit is not None:
+                        last_det_hit = det_hit
+                    t_now = time.time()
+                    self.bite_policy.note_detector(t_now, det_hit is not None)
+                    self.bite_policy.note_template(t_now, match2.found)
+                    if det_hit is not None and not match2.found:
+                        self._log(f" -> [SHADOW:{self.bite_policy.mode}] Detector thấy '!' mà template không thấy: "
+                                  f"tương phản {det_hit.contrast:.0f}, {det_hit.w}x{det_hit.h}, fill {det_hit.fill:.2f}")
+                    if self.bite_policy.should_reel(t_now):
+                        if not match2.found and last_det_hit is not None:
+                            d = last_det_hit
+                            match2 = MatchResult(found=True, confidence=1.0, x=offset[0] + d.x, y=offset[1] + d.y,
+                                                 w=d.w, h=d.h, template_name="bite_detector")
+                    else:
+                        match2 = MatchResult(found=False)
 
                     scan_t = time.time()
                     if last_scan_t is not None:
@@ -650,6 +695,7 @@ class BotEngine:
                         self._log(f" -> [F3] Đã lưu bằng chứng vào: {folder}")
 
                     if match2.found:
+                        self._reel_det_agreed = self.bite_policy.detector_recent(time.time())
                         self.stats["bite_seen"] += 1
                         self._log(f" -> PHÁT HIỆN DẤU CHẤM THAN TRÊN ĐẦU! (Độ khớp: {match2.confidence:.2f} [{match2.template_name}] tại {match2.x}, {match2.y})")
                         found_img2 = True
@@ -736,6 +782,7 @@ class BotEngine:
                         self._log(f" -> Đã thấy nút Bảo Quản ({sc3['keep'].template}, độ khớp {sc3['keep'].score:.2f}). Click tại ({cx}, {cy})")
                         self.input_sim.click(cx, cy, hold_min_ms=hold_min, hold_max_ms=hold_max)
                         self.stats["caught"] += 1
+                        self.stats["caught_det_agreed" if self._reel_det_agreed else "caught_det_missed"] += 1
                         self._log_stats()
                         if self.on_fish_caught:
                             try:
@@ -750,6 +797,7 @@ class BotEngine:
                     # 2. ƯU TIÊN SỐ 2: Đứt dây / hụt cá -> Nút Quăng Cần xuất hiện lại
                     if sc3["cast"].found:
                         self.stats["missed_after_click"] += 1
+                        self.stats["miss_det_agreed" if self._reel_det_agreed else "miss_det_rejected"] += 1
                         self._log(f"⚠️ [ĐỨT DÂY / HỤT CÁ] Nút Quăng Cần ({sc3['cast'].template}, {sc3['cast'].score:.2f}) đã mở lại! Quay về BƯỚC 1 quăng cần mới...")
                         self._log_stats()
                         self._set_state(BotState.STAGE_1)

@@ -41,5 +41,10 @@
   "telemetry": {
     "enabled": true,
     "jsonl_path": "telemetry/telemetry.jsonl"
+  },
+  "bite_detector": {
+    "mode": "shadow",
+    "min_contrast": 20.0,
+    "confirm_window_s": 0.6
   }
 }

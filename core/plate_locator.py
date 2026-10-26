@@ -260,8 +260,9 @@ class PlateTracker:
         if len(hits) > 1:
             far = [h for h in hits[1:] if _dist(h, hits[0]) > 0.5 * hits[0].plate.w]
             ambiguous = bool(far) and (hits[0].score - far[0].score) < self._amb_margin
-        self._last, self._last_seen = hits[0], now
-        return TrackResult(hits[0], "TRACKING", ambiguous)
+        chosen = self._choose(hits) if self._last is not None else hits[0]
+        self._last, self._last_seen = chosen, now
+        return TrackResult(chosen, "TRACKING", ambiguous)
 
     def _choose(self, hits: List[PlateHit]) -> Optional[PlateHit]:
         if not hits:

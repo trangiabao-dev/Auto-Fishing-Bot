@@ -9,17 +9,25 @@
     "b4_sua_can_title": "assets/B4_SuaCan/title",
     "b4_sua_can_btn": "assets/B4_SuaCan/button",
     "b4_hoan_thanh_title": "assets/B4_SuaCan/title_hoan_thanh",
-    "b4_ok_btn": "assets/B4_SuaCan/btn_ok"
+    "b4_ok_btn": "assets/B4_SuaCan/btn_ok",
+    "b5_tui_day_toast": "assets/B5_TuiDay/toast_tui_day.png",
+    "b5_tui_day_speech": "assets/B5_TuiDay/speech_tui_day.png",
+    "b6_btn_mo": "assets/B6_GoiThe/btn_mo.png",
+    "b6_prompt_space": "assets/B6_GoiThe/prompt_space.png",
+    "b6_title_ketqua": "assets/B6_GoiThe/title_ketqua.png",
+    "b6_btn_ok": "assets/B6_GoiThe/btn_ok_card.png"
   },
   "thresholds": {
-    "b1_quang_can": 0.7,
-    "b2_giat_can": 0.7,
-    "b2_cham_than": 0.72,
+    "b1_quang_can": 0.65,
+    "b2_giat_can": 0.6,
+    "b2_cham_than": 0.8,
     "b2_vat_neo": 0.7,
     "b3_bao_quan": 0.7,
     "b2_ten_nhan_vat": 0.65,
     "b4_sua_can": 0.7,
-    "b4_btn_ok": 0.7
+    "b4_btn_ok": 0.7,
+    "b5_tui_day": 0.72,
+    "b6_goi_the": 0.7
   },
   "regions": {
     "b1_quang_can_region": null,
@@ -43,7 +51,7 @@
     "jsonl_path": "telemetry/telemetry.jsonl"
   },
   "bite_detector": {
-    "mode": "shadow",
+    "mode": "either",
     "min_contrast": 20.0,
     "confirm_window_s": 0.6
   }

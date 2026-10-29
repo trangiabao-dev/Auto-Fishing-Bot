@@ -1,0 +1,42 @@
+{
+  "auto_sell": true,
+  "shift_delay_s": 0.28,
+  "fruits": [
+    {
+      "name": "Hạt dẻ",
+      "max_kg": 3.0,
+      "enabled": false,
+      "template_path": "assets/farm/thu_hoach/B6.jpg"
+    },
+    {
+      "name": "Sầu riêng",
+      "max_kg": 30.0,
+      "enabled": true,
+      "template_path": "assets/farm/thu_hoach/item_sau_rieng.png"
+    },
+    {
+      "name": "Đu đủ",
+      "max_kg": 3.0,
+      "enabled": false,
+      "template_path": "assets/farm/thu_hoach/item_du_du.png"
+    },
+    {
+      "name": "Xoài",
+      "max_kg": 3.0,
+      "enabled": false,
+      "template_path": "assets/farm/thu_hoach/item_xoai.png"
+    },
+    {
+      "name": "Dừa",
+      "max_kg": 20.0,
+      "enabled": false,
+      "template_path": "assets/farm/thu_hoach/item_dua.png"
+    },
+    {
+      "name": "Cây đậu",
+      "max_kg": 2.0,
+      "enabled": false,
+      "template_path": "assets/farm/thu_hoach/item_cay_dau.png"
+    }
+  ]
+}

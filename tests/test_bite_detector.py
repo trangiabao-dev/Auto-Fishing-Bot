@@ -224,6 +224,21 @@ class TestTriggerPolicy:
         p.note_template(1.0, False)
         assert p.should_reel(1.0)
 
+    def test_either_reels_on_detector_alone_or_template_alone(self):
+        p = TriggerPolicy("either")
+        # Neither sees it -> False
+        assert not p.should_reel(1.0)
+
+        # Detector sees it -> True
+        p.note_detector(1.0, True)
+        assert p.should_reel(1.0)
+
+        # Template alone sees it -> True
+        p.reset()
+        p.note_template(1.0, True)
+        assert p.should_reel(1.0)
+
+
 
 class TestReplayTool:
     def _clip(self, root, outcome, name, with_bang):

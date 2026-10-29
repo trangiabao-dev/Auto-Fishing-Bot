@@ -28,7 +28,8 @@ class TemplateMatcher:
     auto-extension resolution, and random click calculation.
     """
 
-    _recent_clicks = collections.deque(maxlen=24)
+    _recent_clicks = collections.deque(maxlen=40)
+    _click_seq: int = random.randint(100, 1000)
 
     def __init__(self):
         self._template_cache: Dict[str, np.ndarray] = {}
@@ -282,13 +283,23 @@ class TemplateMatcher:
         ]
 
         # Minimum Euclidean separation threshold to prevent spatial clustering
-        min_dist = max(8.0, min(match.w, match.h) * 0.22)
+        min_dist = max(10.0, min(match.w, match.h) * 0.25)
         best_pt = match.center
         best_d = -1.0
 
-        for _ in range(40):
-            cx = random.randint(min_x, max_x)
-            cy = random.randint(min_y, max_y)
+        # R2 Quasi-Monte Carlo generator (Plastic constant ratio) for maximum dispersion across the entire button surface
+        phi2 = 1.324717957244746
+        a1 = 1.0 / phi2
+        a2 = 1.0 / (phi2 ** 2)
+
+        for _ in range(60):
+            cls._click_seq += 1
+            # Low-discrepancy sampling with Gaussian micro-jitter to prevent mathematical fingerprinting
+            u = (0.5 + a1 * cls._click_seq + random.gauss(0, 0.035)) % 1.0
+            v = (0.5 + a2 * cls._click_seq + random.gauss(0, 0.035)) % 1.0
+            cx = int(min_x + u * (max_x - min_x))
+            cy = int(min_y + v * (max_y - min_y))
+
             lx, ly = cx - match.x, cy - match.y
             if not is_geom_valid(lx, ly):
                 continue

@@ -6,12 +6,13 @@ Who is allowed to pull the trigger? A tiny pure policy so the rollout of BiteDet
   confirm      : reel only when BOTH agree within `window_s` (false-positive reel ~ 0, may miss bites the detector
                  does not see).
   primary      : the detector alone reels (use once recall >= 95 % and false positives <= 1/hour were measured).
+  either       : reels if EITHER the detector OR the template matcher detects '!' (maximum resilience across dynamic weathers).
 
 Pure logic, no OpenCV, no clock of its own (the caller passes `now`), so it is trivially unit-testable.
 """
 from __future__ import annotations
 
-MODES = ("off", "shadow", "confirm", "primary")
+MODES = ("off", "shadow", "confirm", "primary", "either")
 
 
 class TriggerPolicy:
@@ -46,6 +47,8 @@ class TriggerPolicy:
     def should_reel(self, now: float) -> bool:
         if self.mode == "primary":
             return self.detector_recent(now)
+        if self.mode == "either":
+            return self.detector_recent(now) or self._tpl_now
         if self.mode == "confirm":
             return self.detector_recent(now) and self.template_recent(now)
         return self._tpl_now          # off / shadow: exactly the pre-detector behaviour

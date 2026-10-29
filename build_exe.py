@@ -48,7 +48,7 @@ def build():
     def ignore_junk(folder, contents):
         ignored = []
         for c in contents:
-            if c in ("raw_samples", "thong bao tui da day", "tin nhan tui da day", "archive", "__pycache__"):
+            if c in ("raw_samples", "thong bao tui da day", "tin nhan tui da day", "archive", "__pycache__") or c.startswith(("im1_", "im2_", "user_im", "debug_", "scratch_")):
                 ignored.append(c)
             elif "farm" not in folder and (c.endswith(".jpg") or c == "anh_man_hinh_bot_thay.png"):
                 ignored.append(c)

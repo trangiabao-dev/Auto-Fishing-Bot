@@ -178,45 +178,88 @@ def test_farm_engine_step_setup_filter_wide_random_click(farm_engine):
     assert 200 <= b6_click_y <= 200 + b6.shape[0]
 
 
-def test_farm_engine_bottom_up_and_pre_click_veto(farm_engine):
+def test_farm_engine_fixed_point_persists_across_rounds(farm_engine):
     b8 = cv2.imread(r"D:\ToolPT\tests\fixtures\farm\B8.jpg")
     farm_engine.capturer.capture.return_value = (b8, (0, 0))
 
     clicks = []
     farm_engine.input_sim.click.side_effect = lambda x, y, **kwargs: clicks.append((x, y))
 
-    # Case 1: Normal harvest with Bottom-Up strategy
-    # In B8, lowest card < 2.0kg is harvested first
+    # Round 1: First harvest round selects a random eligible card and locks the coordinate
     h1, s1 = farm_engine.execute_harvest_round(b8, max_kg=2.0)
     assert h1 is True
     assert len(clicks) == 1
+    pt1 = farm_engine._fixed_harvest_point
+    assert pt1 is not None
+    assert clicks[0] == pt1
 
-    # Case 2: Pre-Click VETO
-    # If the frame suddenly shifts right before click to a giant crop (e.g. 5.08kg at the cursor)
-    # The pre-click verification MUST detect weight >= max_kg and abort the click!
-    clicks.clear()
+    # Round 2: Next harvest round MUST keep clicking the EXACT same point
+    h2, s2 = farm_engine.execute_harvest_round(b8, max_kg=2.0)
+    assert h2 is True
+    assert len(clicks) == 2
+    assert clicks[1] == pt1, "Must maintain identical click point without jumping buttons!"
+    assert farm_engine._fixed_harvest_point == pt1
+
+
+def test_farm_engine_fixed_point_resets_on_white_space_and_re_randomizes(farm_engine):
+    b8 = cv2.imread(r"D:\ToolPT\tests\fixtures\farm\B8.jpg")
+    farm_engine.capturer.capture.return_value = (b8, (0, 0))
+
+    clicks = []
+    farm_engine.input_sim.click.side_effect = lambda x, y, **kwargs: clicks.append((x, y))
+
+    # Round 1: Selects an eligible card
+    farm_engine.execute_harvest_round(b8, max_kg=2.0)
+    pt1 = farm_engine._fixed_harvest_point
+    assert pt1 is not None
+
+    # Simulate slot becoming white space (no card under pt1)
+    # Set fixed point to coordinate outside any card (e.g. 50, 50)
+    farm_engine._fixed_harvest_point = (50, 50)
+
+    # Next round: Slot is empty -> Re-randomizes another eligible button
+    h2, s2 = farm_engine.execute_harvest_round(b8, max_kg=2.0)
+    assert h2 is True
+    pt2 = farm_engine._fixed_harvest_point
+    assert pt2 is not None
+    assert pt2 != (50, 50), "Must re-randomize to a valid card button when hitting white space!"
+
+
+def test_farm_engine_fixed_point_vetoes_and_resets_on_heavy_crop(farm_engine):
+    b8 = cv2.imread(r"D:\ToolPT\tests\fixtures\farm\B8.jpg")
     cards = farm_engine.digit_reader.scan_cards(b8)
-    # Mock a shifted frame where all cards are giant (> 5.0kg)
-    # Simulate fresh capture having only heavy card
-    giant_frame = b8.copy()
-    farm_engine.capturer.capture.return_value = (giant_frame, (0, 0))
+    heavy_card = [c for c in cards if c.weight >= 3.0][0]
 
-    # Try harvesting with max_kg=1.04 (only the 1.03kg card would match from initial scan)
-    # But if verify frame is treated as heavy, veto triggers:
-    mock_heavy_card = MagicMock()
-    mock_heavy_card.btn_x, mock_heavy_card.btn_w = 0, 1920
-    mock_heavy_card.btn_y, mock_heavy_card.btn_h = 0, 1080
-    mock_heavy_card.weight = 4.85  # Heavy shifted crop!
-    
-    orig_scan = farm_engine.digit_reader.scan_cards
-    farm_engine.digit_reader.scan_cards = MagicMock(side_effect=[
-        orig_scan(b8),           # Initial scan (finds eligible card)
-        [mock_heavy_card],        # Verification capture right before click (detects heavy shifted card!)
-    ])
+    # Lock fixed point onto a heavy card's button
+    cx, cy = heavy_card.get_click_point()
+    farm_engine._fixed_harvest_point = (cx, cy)
 
-    h_veto, s_veto = farm_engine.execute_harvest_round(b8, max_kg=2.0)
-    assert h_veto is False, "Must abort harvest when pre-click verification detects shifted heavy crop!"
-    assert len(clicks) == 0, "Mouse click MUST be vetoed and never fired!"
+    clicks = []
+    farm_engine.input_sim.click.side_effect = lambda x, y, **kwargs: clicks.append((x, y))
+
+    # Execute round with max_kg=2.0
+    # Must VETO click on the heavy card and reset fixed point
+    h, s = farm_engine.execute_harvest_round(b8, max_kg=2.0)
+    assert h is True  # Re-randomized to another eligible card in the same round
+    assert len(clicks) == 1
+    assert clicks[0] != (cx, cy), "Click on heavy crop MUST be vetoed!"
+    assert farm_engine._fixed_harvest_point != (cx, cy)
+
+
+def test_farm_engine_row4_cards_are_not_clipped_at_bottom():
+    img_path = r"C:\Users\ACER\.gemini\antigravity\brain\6bf98727-89dc-4060-8a7f-c4d9602d9ce2\.user_uploaded\media_1793287879880_51a16a10.png"
+    frame = cv2.imread(img_path)
+    frame_1080 = cv2.resize(frame, (1920, 1080), interpolation=cv2.INTER_CUBIC)
+
+    from core.digit_reader import DigitReader
+    dr = DigitReader()
+    cards = dr.scan_cards(frame_1080)
+
+    # Row 4 card (0.15kg at index 7) must NOT be marked clipped
+    c7 = [c for c in cards if abs(c.weight - 0.15) < 0.05][0]
+    assert c7.is_clipped is False, "Row 4 cards at bottom of modal must not be marked clipped!"
+    # Ensure button bottom is above bottom bar (Y < 845)
+    assert c7.btn_y + c7.btn_h <= 837
 
 
 def test_farm_engine_get_scrollbar_info(farm_engine):

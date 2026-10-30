@@ -150,8 +150,9 @@ class DigitReader:
             # VIEWPORT CLIPPING GUARD:
             # Cards cut off at the bottom of the scroll container (Row 5+) or with clipped cyan buttons
             # are flagged as is_clipped=True so the engine will scroll down to bring them fully into view.
+            # In 1080p, row 4 ends at Y=820px, while modal bottom bar starts at Y=845px (0.775*1080 = 837px).
             is_clipped = False
-            if fh >= 900 and (btn_y + btn_h > int(fh * 0.72) or kg_y > int(fh * 0.70)):
+            if fh >= 900 and (btn_y + btn_h > int(fh * 0.775) or kg_y > int(fh * 0.76)):
                 is_clipped = True
             else:
                 x0_b, x1_b = max(0, btn_x), min(fw, btn_x + btn_w)

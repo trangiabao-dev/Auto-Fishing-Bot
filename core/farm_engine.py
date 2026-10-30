@@ -601,65 +601,97 @@ class FarmEngine:
     def execute_harvest_round(self, frame: np.ndarray, max_kg: float) -> Tuple[bool, bool]:
         """
         Scans visible harvest cards with OCR.
-        Harvests cards where weight < max_kg. Protects cards with weight >= max_kg.
-        Applies Bottom-Up priority (harvests lowest small crops first to keep upper giant crops stationary).
-        Enforces Zero-Tolerance Pre-Click OCR Verification right before mouse click down.
-        Returns: (harvested_any, should_scroll)
+        Locks onto a single fixed harvest button and coordinate (self._fixed_harvest_point) selected randomly once.
+        Clicks the exact same point repeatedly as crops shift forward.
+        - If a crop shifting into the point is >= max_kg: Vetoes click to protect giant crop, resets fixed point, picks another button.
+        - If the point is empty/white space: Resets fixed point, re-randomizes another eligible button.
+        - Returns: (harvested_any, should_scroll)
         """
+        if self.is_filter_empty(frame):
+            self._fixed_harvest_point = None
+            return False, False  # Empty banner showing: stop immediately, DO NOT SCROLL!
+
         cards = self.digit_reader.scan_cards(frame)
         if not cards:
-            if self.is_filter_empty(frame):
-                return False, False  # Empty banner showing: stop immediately, DO NOT SCROLL!
+            self._fixed_harvest_point = None
             return False, True
 
+        # Check if we currently have a locked click point
+        if self._fixed_harvest_point is not None:
+            cx, cy = self._fixed_harvest_point
+            # Find the card under the fixed point
+            under = [c for c in cards if c.btn_x <= cx <= c.btn_x + c.btn_w and c.btn_y <= cy <= c.btn_y + c.btn_h]
+            if not under:
+                # Slot became empty / white space
+                self._log("ℹ️ [ĐỔI VỊ TRÍ] Vị trí ô thu hoạch cũ đã trống (khoảng trắng)! Đang chọn random nút thu hoạch khác...")
+                self._fixed_harvest_point = None
+            else:
+                card = under[0]
+                if card.weight >= max_kg or card.weight <= 0.0:
+                    self._log(f"🛡️ [VETO BẢO VỆ] Quả dồn vào ô cố định ({cx},{cy}) là {card.weight:.2f}kg >= {max_kg:.2f}kg! Hủy click bảo vệ quả lớn, chuyển sang nút khác...")
+                    self._fixed_harvest_point = None
+                elif card.is_clipped:
+                    self._fixed_harvest_point = None
+                else:
+                    # Valid eligible card under fixed point: Keep clicking this exact coordinate!
+                    self._log(f"🧺 [THU HOẠCH] Đang thu ô #{card.card_index}: {card.weight:.2f}kg (< {max_kg:.2f}kg) tại ({cx}, {cy})...")
+                    self.input_sim.click(cx, cy, hold_min_ms=25, hold_max_ms=45)
+                    self.stats["harvested_count"] += 1
+                    time.sleep(max(self.cfg_mgr.shift_delay_s, 0.65))
+                    return True, False
+
+        # If _fixed_harvest_point is None (first time after filter, or after white space / veto)
         eligible = [c for c in cards if 0.0 < c.weight < max_kg and not c.is_clipped]
-
         if eligible:
-            # Bottom-Up Strategy: Always harvest the lowest eligible card on screen first!
-            # Deleting from the bottom keeps all upper/giant crops 100% stationary.
-            target = eligible[-1]
+            target = random.choice(eligible)
             cx, cy = target.get_click_point()
-
-            # Zero-Tolerance Pre-Click Verification:
-            # Re-verify the card right under (cx, cy) on a fresh capture before clicking
-            f_verify, _ = self.capturer.capture(None)
-            fresh_cards = self.digit_reader.scan_cards(f_verify)
-            under_cursor = [c for c in fresh_cards if c.btn_x <= cx <= c.btn_x + c.btn_w and c.btn_y <= cy <= c.btn_y + c.btn_h]
-            if not under_cursor:
-                self._log("🛡️ [VETO KHẨN CẤP] Nút thu hoạch đã dịch chuyển khỏi vị trí! Hủy click an toàn.")
-                time.sleep(0.3)
-                return False, False
-
-            fresh_target = under_cursor[0]
-            if fresh_target.weight >= max_kg or fresh_target.weight <= 0.0:
-                self._log(f"🛡️ [VETO KHẨN CẤP] Phát hiện quả bị dồn thành {fresh_target.weight:.2f}kg >= {max_kg:.2f}kg! Hủy click bảo vệ quả khổng lồ!")
-                time.sleep(0.3)
-                return False, False
-
-            self._log(f"🧺 [THU HOẠCH] Đang thu ô #{fresh_target.card_index}: {fresh_target.weight:.2f}kg (< {max_kg:.2f}kg)...")
+            self._fixed_harvest_point = (cx, cy)
+            self._log(f"🎯 [CỐ ĐỊNH NÚT] Đã random chọn ô #{target.card_index} ({target.weight:.2f}kg) tại ({cx}, {cy}) để thu hoạch liên tục...")
             self.input_sim.click(cx, cy, hold_min_ms=25, hold_max_ms=45)
             self.stats["harvested_count"] += 1
-            # Settle Delay: Allow Unity layout transition and fade animation to fully complete
             time.sleep(max(self.cfg_mgr.shift_delay_s, 0.65))
             return True, False
         else:
+            self._fixed_harvest_point = None
             self.stats["skipped_heavy_count"] += len(cards)
             return False, True
 
     def execute_fast_harvest_round(self, frame: np.ndarray) -> Tuple[bool, bool]:
         """
         Rapid harvest round without OCR for Category B.
-        Locates visible harvest buttons and clicks with Bottom-Up ordering.
+        Locks onto a single fixed harvest button and coordinate (self._fixed_harvest_point) selected randomly once.
+        Clicks the exact same point repeatedly as crops shift forward.
+        If point is empty/white space: Resets fixed point, re-randomizes another button.
         Returns: (harvested_any, should_scroll)
         """
         if self.is_filter_empty(frame):
+            self._fixed_harvest_point = None
             return False, False  # Empty banner: stop immediately, DO NOT SCROLL!
+
         cards = self.digit_reader.scan_cards(frame)
         actionable_cards = [c for c in cards if not c.is_clipped]
+
+        # Check if we currently have a locked click point
+        if self._fixed_harvest_point is not None:
+            cx, cy = self._fixed_harvest_point
+            under = [c for c in actionable_cards if c.btn_x <= cx <= c.btn_x + c.btn_w and c.btn_y <= cy <= c.btn_y + c.btn_h]
+            if not under:
+                self._log("ℹ️ [ĐỔI VỊ TRÍ TỰ DO] Vị trí ô thu hoạch cũ đã trống (khoảng trắng). Đang chọn random nút khác...")
+                self._fixed_harvest_point = None
+            else:
+                target = under[0]
+                self._log(f"⚡ [THU HOẠCH TỰ DO] Thu ô #{target.card_index} tại ({cx}, {cy})...")
+                self.input_sim.click(cx, cy, hold_min_ms=25, hold_max_ms=45)
+                self.stats["harvested_count"] += 1
+                time.sleep(max(self.cfg_mgr.shift_delay_s, 0.50))
+                return True, False
+
+        # If _fixed_harvest_point is None: pick random actionable card
         if actionable_cards:
-            target = actionable_cards[-1]
+            target = random.choice(actionable_cards)
             cx, cy = target.get_click_point()
-            self._log(f"⚡ [THU HOẠCH TỰ DO] Thu ô #{target.card_index}...")
+            self._fixed_harvest_point = (cx, cy)
+            self._log(f"🎯 [CỐ ĐỊNH NÚT TỰ DO] Đã random chọn ô #{target.card_index} tại ({cx}, {cy}) để thu hoạch liên tục...")
             self.input_sim.click(cx, cy, hold_min_ms=25, hold_max_ms=45)
             self.stats["harvested_count"] += 1
             time.sleep(max(self.cfg_mgr.shift_delay_s, 0.50))
@@ -674,18 +706,19 @@ class FarmEngine:
                 if not any(abs(pt[0] - p[0]) < 15 and abs(pt[1] - p[1]) < 15 for p in hits):
                     hits.append(pt)
             if hits:
-                hits.sort(key=lambda p: (p[1] // 50, p[0]))
-                target = hits[-1]
+                target_pt = random.choice(hits)
                 tw, th = tpl.shape[1], tpl.shape[0]
-                bx, by = target[0], target[1]
+                bx, by = target_pt[0], target_pt[1]
                 rx = random.randint(bx + 15, bx + tw - 15)
                 ry = random.randint(by + 10, by + th - 10)
+                self._fixed_harvest_point = (rx, ry)
                 self.input_sim.click(rx, ry, hold_min_ms=25, hold_max_ms=45)
                 self.stats["harvested_count"] += 1
-                self._log("⚡ [THU HOẠCH TỰ DO] Đã bấm nút thu hoạch...")
+                self._log(f"⚡ [THU HOẠCH TỰ DO] Cố định nút tại ({rx}, {ry})...")
                 time.sleep(max(self.cfg_mgr.shift_delay_s, 0.50))
                 return True, False
 
+        self._fixed_harvest_point = None
         return False, True
 
     def get_scrollbar_info(self, frame: np.ndarray) -> Tuple[float, float, bool]:
@@ -1059,6 +1092,7 @@ class FarmEngine:
         stuck_scrolls = 0
         total_scrolls = 0
         last_wait_log = 0.0
+        self._fixed_harvest_point = None
 
         while not self._stop_event:
             if self._pause_event:
@@ -1181,9 +1215,24 @@ class FarmEngine:
 
                         self._log(f"📜 [CUỘN TRANG] Các quả hiện tại đều >= {max_kg:.2f}kg (Thanh cuộn: {bottom_ratio*100:.0f}%). Đang cuộn xuống tìm quả nhỏ hơn... (Lần {total_scrolls})")
                         scrolled = self.scroll_harvest_list_down(frame)
+                        self._fixed_harvest_point = None
                         if not scrolled or is_at_bottom:
                             stuck_scrolls += 1
                             if stuck_scrolls >= 2:
+                                # FAIL-SAFE BOTTOM EXIT VERIFICATION:
+                                # Ensure zero remaining harvestable crops are left unharvested before exiting!
+                                time.sleep(0.4)
+                                f_last, _ = self.capturer.capture(None)
+                                last_cards = self.digit_reader.scan_cards(f_last)
+                                fh_last = f_last.shape[0]
+                                remaining = [
+                                    c for c in last_cards
+                                    if 0.0 < c.weight < max_kg and (c.btn_y + 40 <= int(fh_last * 0.785))
+                                ]
+                                if remaining:
+                                    self._log(f"🌾 [ĐÁY BẢNG NHƯNG CÒN QUẢ] Còn {len(remaining)} quả hợp lệ (< {max_kg:.2f}kg) ở đáy danh sách! Thu hoạch nốt trước khi kết thúc...")
+                                    stuck_scrolls = 0
+                                    continue
                                 self._log(f"🏁 [ĐÁY DANH SÁCH] Đã cuộn đến đáy bảng nông sản (thanh cuộn chạm đáy)! Tất cả các quả còn lại đều >= {max_kg:.2f}kg.")
                                 break
                         else:
@@ -1237,6 +1286,7 @@ class FarmEngine:
         stuck_scrolls = 0
         total_scrolls = 0
         last_wait_log = 0.0
+        self._fixed_harvest_point = None
 
         while not self._stop_event:
             if self._pause_event:
@@ -1357,9 +1407,19 @@ class FarmEngine:
 
                         self._log(f"📜 [CUỘN TRANG] Đang cuộn xuống tiếp tục thu hoạch... (Thanh cuộn: {bottom_ratio*100:.0f}%, Lần {total_scrolls})")
                         scrolled = self.scroll_harvest_list_down(frame)
+                        self._fixed_harvest_point = None
                         if not scrolled or is_at_bottom:
                             stuck_scrolls += 1
                             if stuck_scrolls >= 2:
+                                time.sleep(0.4)
+                                f_last, _ = self.capturer.capture(None)
+                                last_cards = self.digit_reader.scan_cards(f_last)
+                                fh_last = f_last.shape[0]
+                                remaining = [c for c in last_cards if c.btn_y + 40 <= int(fh_last * 0.785)]
+                                if remaining:
+                                    self._log(f"🌾 [ĐÁY BẢNG NHƯNG CÒN QUẢ] Còn {len(remaining)} quả ở đáy danh sách! Thu hoạch nốt trước khi kết thúc...")
+                                    stuck_scrolls = 0
+                                    continue
                                 self._log("🏁 [ĐÁY DANH SÁCH] Đã cuộn hết toàn bộ danh sách và thu hoạch xong!")
                                 break
                         else:

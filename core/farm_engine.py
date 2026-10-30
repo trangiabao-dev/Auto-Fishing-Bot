@@ -602,13 +602,12 @@ class FarmEngine:
         """
         Scans visible harvest cards with OCR.
         Harvests cards where weight < max_kg. Protects cards with weight >= max_kg.
-        Maintains a fixed randomized click coordinate on the eligible harvest button
-        for the entire harvest session (until bag full or sold), eliminating mouse jitter.
+        Applies Bottom-Up priority (harvests lowest small crops first to keep upper giant crops stationary).
+        Enforces Zero-Tolerance Pre-Click OCR Verification right before mouse click down.
         Returns: (harvested_any, should_scroll)
         """
         cards = self.digit_reader.scan_cards(frame)
         if not cards:
-            self._fixed_harvest_point = None
             if self.is_filter_empty(frame):
                 return False, False  # Empty banner showing: stop immediately, DO NOT SCROLL!
             return False, True
@@ -616,48 +615,54 @@ class FarmEngine:
         eligible = [c for c in cards if 0.0 < c.weight < max_kg and not c.is_clipped]
 
         if eligible:
-            target = eligible[0]
-            # Randomize once upon entering the harvest window; preserve coordinate for subsequent shifts
-            if (self._fixed_harvest_point is None or
-                not (target.btn_x <= self._fixed_harvest_point[0] <= target.btn_x + target.btn_w and
-                     target.btn_y <= self._fixed_harvest_point[1] <= target.btn_y + target.btn_h)):
-                self._fixed_harvest_point = target.get_click_point()
+            # Bottom-Up Strategy: Always harvest the lowest eligible card on screen first!
+            # Deleting from the bottom keeps all upper/giant crops 100% stationary.
+            target = eligible[-1]
+            cx, cy = target.get_click_point()
 
-            cx, cy = self._fixed_harvest_point
-            self._log(f"🧺 [THU HOẠCH] Đang thu ô #{target.card_index}: {target.weight:.2f}kg (< {max_kg:.2f}kg)...")
+            # Zero-Tolerance Pre-Click Verification:
+            # Re-verify the card right under (cx, cy) on a fresh capture before clicking
+            f_verify, _ = self.capturer.capture(None)
+            fresh_cards = self.digit_reader.scan_cards(f_verify)
+            under_cursor = [c for c in fresh_cards if c.btn_x <= cx <= c.btn_x + c.btn_w and c.btn_y <= cy <= c.btn_y + c.btn_h]
+            if not under_cursor:
+                self._log("🛡️ [VETO KHẨN CẤP] Nút thu hoạch đã dịch chuyển khỏi vị trí! Hủy click an toàn.")
+                time.sleep(0.3)
+                return False, False
+
+            fresh_target = under_cursor[0]
+            if fresh_target.weight >= max_kg or fresh_target.weight <= 0.0:
+                self._log(f"🛡️ [VETO KHẨN CẤP] Phát hiện quả bị dồn thành {fresh_target.weight:.2f}kg >= {max_kg:.2f}kg! Hủy click bảo vệ quả khổng lồ!")
+                time.sleep(0.3)
+                return False, False
+
+            self._log(f"🧺 [THU HOẠCH] Đang thu ô #{fresh_target.card_index}: {fresh_target.weight:.2f}kg (< {max_kg:.2f}kg)...")
             self.input_sim.click(cx, cy, hold_min_ms=25, hold_max_ms=45)
             self.stats["harvested_count"] += 1
-            time.sleep(self.cfg_mgr.shift_delay_s)
+            # Settle Delay: Allow Unity layout transition and fade animation to fully complete
+            time.sleep(max(self.cfg_mgr.shift_delay_s, 0.65))
             return True, False
         else:
-            self._fixed_harvest_point = None
             self.stats["skipped_heavy_count"] += len(cards)
             return False, True
 
     def execute_fast_harvest_round(self, frame: np.ndarray) -> Tuple[bool, bool]:
         """
         Rapid harvest round without OCR for Category B.
-        Locates any visible harvest buttons and clicks the top-most one.
-        Preserves single fixed click point per harvest session.
+        Locates visible harvest buttons and clicks with Bottom-Up ordering.
         Returns: (harvested_any, should_scroll)
         """
         if self.is_filter_empty(frame):
-            self._fixed_harvest_point = None
             return False, False  # Empty banner: stop immediately, DO NOT SCROLL!
         cards = self.digit_reader.scan_cards(frame)
         actionable_cards = [c for c in cards if not c.is_clipped]
         if actionable_cards:
-            target = actionable_cards[0]
-            if (self._fixed_harvest_point is None or
-                not (target.btn_x <= self._fixed_harvest_point[0] <= target.btn_x + target.btn_w and
-                     target.btn_y <= self._fixed_harvest_point[1] <= target.btn_y + target.btn_h)):
-                self._fixed_harvest_point = target.get_click_point()
-
-            cx, cy = self._fixed_harvest_point
+            target = actionable_cards[-1]
+            cx, cy = target.get_click_point()
             self._log(f"⚡ [THU HOẠCH TỰ DO] Thu ô #{target.card_index}...")
             self.input_sim.click(cx, cy, hold_min_ms=25, hold_max_ms=45)
             self.stats["harvested_count"] += 1
-            time.sleep(self.cfg_mgr.shift_delay_s)
+            time.sleep(max(self.cfg_mgr.shift_delay_s, 0.50))
             return True, False
 
         tpl = self._templates.get("btn_thu_hoach")
@@ -670,25 +675,91 @@ class FarmEngine:
                     hits.append(pt)
             if hits:
                 hits.sort(key=lambda p: (p[1] // 50, p[0]))
-                target = hits[0]
+                target = hits[-1]
                 tw, th = tpl.shape[1], tpl.shape[0]
                 bx, by = target[0], target[1]
-                if (self._fixed_harvest_point is None or
-                    not (bx <= self._fixed_harvest_point[0] <= bx + tw and
-                         by <= self._fixed_harvest_point[1] <= by + th)):
-                    rx = random.randint(bx + 15, bx + tw - 15)
-                    ry = random.randint(by + 10, by + th - 10)
-                    self._fixed_harvest_point = (rx, ry)
-
-                cx, cy = self._fixed_harvest_point
-                self.input_sim.click(cx, cy, hold_min_ms=25, hold_max_ms=45)
+                rx = random.randint(bx + 15, bx + tw - 15)
+                ry = random.randint(by + 10, by + th - 10)
+                self.input_sim.click(rx, ry, hold_min_ms=25, hold_max_ms=45)
                 self.stats["harvested_count"] += 1
-                self._log(f"⚡ [THU HOẠCH TỰ DO] Đã bấm nút thu hoạch...")
-                time.sleep(self.cfg_mgr.shift_delay_s)
+                self._log("⚡ [THU HOẠCH TỰ DO] Đã bấm nút thu hoạch...")
+                time.sleep(max(self.cfg_mgr.shift_delay_s, 0.50))
                 return True, False
 
-        self._fixed_harvest_point = None
         return False, True
+
+    def get_scrollbar_info(self, frame: np.ndarray) -> Tuple[float, float, bool]:
+        """
+        Analyzes the vertical scrollbar on the right edge of the harvest window.
+        Returns:
+            thumb_height_ratio: Length of thumb relative to track (0.0 to 1.0).
+            thumb_bottom_ratio: Position of the bottom edge of thumb (0.0 to 1.0).
+            is_at_bottom: True if thumb is touching the bottom of track (bottom_ratio >= 0.95).
+        """
+        fh, fw = frame.shape[:2]
+        rx0, rx1 = int(fw * (1625 / 1920)), int(fw * (1655 / 1920))
+        ry0, ry1 = int(fh * (235 / 1080)), int(fh * (850 / 1080))
+        if ry1 > fh or rx1 > fw:
+            return 1.0, 1.0, True
+
+        crop = frame[ry0:ry1, rx0:rx1]
+        if crop.size == 0:
+            return 1.0, 1.0, True
+
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        w_crop = crop.shape[1]
+        cx0, cx1 = int(w_crop * 0.35), int(w_crop * 0.65)
+        sb_center = gray[:, cx0:cx1].mean(axis=1)
+
+        is_thumb = sb_center > 225
+        thumb_idx = np.where(is_thumb)[0]
+        if len(thumb_idx) == 0:
+            return 1.0, 1.0, True
+
+        t_bottom = thumb_idx.max() / float(len(sb_center))
+        thumb_height_ratio = (thumb_idx.max() - thumb_idx.min()) / float(len(sb_center))
+        is_at_bottom = bool(t_bottom >= 0.95)
+        return thumb_height_ratio, t_bottom, is_at_bottom
+
+    def scroll_harvest_list_down(self, frame: np.ndarray) -> bool:
+        """
+        Performs a verified scroll-down gesture on the harvest table.
+        Uses native swipe-up drag on the neutral body of the crop card (X: ~550, Y: 680 -> 280)
+        combined with mouse wheel as fallback.
+        Captures frame before and after to verify whether list content actually shifted.
+
+        Returns:
+            True if the list moved (weights or card positions shifted).
+            False if the list is stationary / reached the absolute bottom.
+        """
+        fh, fw = frame.shape[:2]
+        cards_before = self.digit_reader.scan_cards(frame)
+        sig_before = [(round(c.weight, 2), c.kg_y) for c in cards_before]
+
+        # 1. Native swipe-up drag (touch gesture emulation for Unity ScrollRect)
+        x0 = int(fw * (550 / 1920))
+        y0 = int(fh * (680 / 1080))
+        x1 = int(fw * (550 / 1920))
+        y1 = int(fh * (280 / 1080))
+        self.input_sim.drag(x0, y0, x1, y1, duration_s=0.22, steps=12)
+
+        # 2. Wheel fallback directly over the scroll container
+        self.input_sim.move_to(x0, int(fh * (480 / 1080)), human_curve=False)
+        for _ in range(4):
+            self.input_sim.scroll(-120)
+            time.sleep(0.03)
+
+        time.sleep(0.4)  # Wait for Unity physics / inertia to settle
+
+        # 3. Capture new frame and compare card signatures
+        new_frame, _ = self.capturer.capture(None)
+        cards_after = self.digit_reader.scan_cards(new_frame)
+        sig_after = [(round(c.weight, 2), c.kg_y) for c in cards_after]
+
+        if not sig_before and not sig_after:
+            return False
+
+        return sig_before != sig_after
 
     def count_sellable_crops_in_shop(self, frame: np.ndarray) -> int:
         """
@@ -985,7 +1056,8 @@ class FarmEngine:
              - Ready to open: Click 'Thu hoạch' (B2) to open harvest window.
         """
         filter_done = False
-        consecutive_scrolls = 0
+        stuck_scrolls = 0
+        total_scrolls = 0
         last_wait_log = 0.0
 
         while not self._stop_event:
@@ -1010,7 +1082,8 @@ class FarmEngine:
                     if sold:
                         self._bag_is_full = False
                         filter_done = False  # Reset filter to re-apply for remaining fruits
-                        consecutive_scrolls = 0
+                        stuck_scrolls = 0
+                        total_scrolls = 0
                     time.sleep(1.0)
                     continue
 
@@ -1093,22 +1166,28 @@ class FarmEngine:
                         self._log(f"🏁 [HẾT QUẢ] Đã thu hết toàn bộ trái phù hợp cho quả '{fruit_name}'!")
                         break
 
+                    # Monitor scrollbar status to detect bottom position and shrinking content
+                    thumb_ratio, bottom_ratio, is_at_bottom = self.get_scrollbar_info(frame)
+
                     harvested, should_scroll = self.execute_harvest_round(frame, max_kg)
                     if harvested:
-                        consecutive_scrolls = 0
+                        stuck_scrolls = 0
+                        total_scrolls = 0
                     elif should_scroll:
-                        consecutive_scrolls += 1
-                        if consecutive_scrolls <= 8:
-                            self._log(f"📜 [CUỘN TRANG] Các quả hiện tại đều >= {max_kg:.2f}kg. Cuộn xuống (Lần {consecutive_scrolls}/8)...")
-                            self.input_sim.move_to(frame.shape[1] // 2, frame.shape[0] // 2)
-                            time.sleep(0.05)
-                            for _ in range(3):
-                                self.input_sim.scroll(-120)
-                                time.sleep(0.08)
-                            time.sleep(0.6)
-                        else:
-                            self._log(f"🏁 [XONG QUẢ] Đã quét hết danh sách! Các quả còn lại đều là quả khổng lồ >= {max_kg:.2f}kg.")
+                        total_scrolls += 1
+                        if total_scrolls > 40:
+                            self._log(f"🏁 [XONG QUẢ] Đã đạt giới hạn quét tối đa (40 lần cuộn)! Kết thúc quả '{fruit_name}'.")
                             break
+
+                        self._log(f"📜 [CUỘN TRANG] Các quả hiện tại đều >= {max_kg:.2f}kg (Thanh cuộn: {bottom_ratio*100:.0f}%). Đang cuộn xuống tìm quả nhỏ hơn... (Lần {total_scrolls})")
+                        scrolled = self.scroll_harvest_list_down(frame)
+                        if not scrolled or is_at_bottom:
+                            stuck_scrolls += 1
+                            if stuck_scrolls >= 2:
+                                self._log(f"🏁 [ĐÁY DANH SÁCH] Đã cuộn đến đáy bảng nông sản (thanh cuộn chạm đáy)! Tất cả các quả còn lại đều >= {max_kg:.2f}kg.")
+                                break
+                        else:
+                            stuck_scrolls = 0
                     continue
 
                 # 4. Detect Main Screen HUD (Nút Bán / Nút Thu hoạch)
@@ -1155,7 +1234,8 @@ class FarmEngine:
         Fully state-aware and idempotent across all configured fruits.
         """
         filter_done = False
-        consecutive_scrolls = 0
+        stuck_scrolls = 0
+        total_scrolls = 0
         last_wait_log = 0.0
 
         while not self._stop_event:
@@ -1180,7 +1260,8 @@ class FarmEngine:
                     if sold:
                         self._bag_is_full = False
                         filter_done = False  # Reset filter to re-apply
-                        consecutive_scrolls = 0
+                        stuck_scrolls = 0
+                        total_scrolls = 0
                     time.sleep(1.0)
                     continue
 
@@ -1262,21 +1343,27 @@ class FarmEngine:
                         self._log("🏁 [XONG NHÓM 2] Phát hiện thông báo: 'Không có trái nào phù hợp với bộ lọc đã chọn.'!")
                         break
 
+                    thumb_ratio, bottom_ratio, is_at_bottom = self.get_scrollbar_info(frame)
+
                     harvested, should_scroll = self.execute_fast_harvest_round(frame)
                     if harvested:
-                        consecutive_scrolls = 0
+                        stuck_scrolls = 0
+                        total_scrolls = 0
                     elif should_scroll:
-                        consecutive_scrolls += 1
-                        if consecutive_scrolls <= 8:
-                            self.input_sim.move_to(frame.shape[1] // 2, frame.shape[0] // 2)
-                            time.sleep(0.05)
-                            for _ in range(3):
-                                self.input_sim.scroll(-120)
-                                time.sleep(0.08)
-                            time.sleep(0.6)
-                        else:
-                            self._log("🏁 [XONG NHÓM 2] Đã cuộn hết danh sách và thu hoạch xong!")
+                        total_scrolls += 1
+                        if total_scrolls > 40:
+                            self._log("🏁 [XONG NHÓM 2] Đã đạt giới hạn quét tối đa (40 lần cuộn)!")
                             break
+
+                        self._log(f"📜 [CUỘN TRANG] Đang cuộn xuống tiếp tục thu hoạch... (Thanh cuộn: {bottom_ratio*100:.0f}%, Lần {total_scrolls})")
+                        scrolled = self.scroll_harvest_list_down(frame)
+                        if not scrolled or is_at_bottom:
+                            stuck_scrolls += 1
+                            if stuck_scrolls >= 2:
+                                self._log("🏁 [ĐÁY DANH SÁCH] Đã cuộn hết toàn bộ danh sách và thu hoạch xong!")
+                                break
+                        else:
+                            stuck_scrolls = 0
                     continue
 
                 # 4. Main HUD

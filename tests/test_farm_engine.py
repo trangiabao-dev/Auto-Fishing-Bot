@@ -36,6 +36,7 @@ def test_farm_engine_detects_bag_full_toast(farm_engine):
 
 def test_farm_engine_harvest_round_clicks_only_eligible_cards(farm_engine):
     b8 = cv2.imread(r"D:\ToolPT\tests\fixtures\farm\B8.jpg")
+    farm_engine.capturer.capture.return_value = (b8, (0, 0))
 
     # In B8: weights are 5.08, 4.98, 4.86, 4.75, 4.46, 4.02, 1.06, 1.03...
     # Case 1: max_kg = 2.0 -> Cards with 1.06kg and 1.03kg are eligible
@@ -177,29 +178,53 @@ def test_farm_engine_step_setup_filter_wide_random_click(farm_engine):
     assert 200 <= b6_click_y <= 200 + b6.shape[0]
 
 
-def test_farm_engine_fixed_harvest_point_persists_during_session(farm_engine):
+def test_farm_engine_bottom_up_and_pre_click_veto(farm_engine):
     b8 = cv2.imread(r"D:\ToolPT\tests\fixtures\farm\B8.jpg")
+    farm_engine.capturer.capture.return_value = (b8, (0, 0))
 
     clicks = []
     farm_engine.input_sim.click.side_effect = lambda x, y, **kwargs: clicks.append((x, y))
 
-    # Round 1: First harvest click picks a random fixed coordinate
-    assert farm_engine._fixed_harvest_point is None
+    # Case 1: Normal harvest with Bottom-Up strategy
+    # In B8, lowest card < 2.0kg is harvested first
     h1, s1 = farm_engine.execute_harvest_round(b8, max_kg=2.0)
     assert h1 is True
-    assert farm_engine._fixed_harvest_point is not None
-    first_pt = farm_engine._fixed_harvest_point
-    assert clicks[0] == first_pt
+    assert len(clicks) == 1
 
-    # Round 2: Second harvest click MUST reuse the exact same fixed coordinate
-    h2, s2 = farm_engine.execute_harvest_round(b8, max_kg=2.0)
-    assert h2 is True
-    assert farm_engine._fixed_harvest_point == first_pt
-    assert clicks[1] == first_pt  # No jitter, identical point
+    # Case 2: Pre-Click VETO
+    # If the frame suddenly shifts right before click to a giant crop (e.g. 5.08kg at the cursor)
+    # The pre-click verification MUST detect weight >= max_kg and abort the click!
+    clicks.clear()
+    cards = farm_engine.digit_reader.scan_cards(b8)
+    # Mock a shifted frame where all cards are giant (> 5.0kg)
+    # Simulate fresh capture having only heavy card
+    giant_frame = b8.copy()
+    farm_engine.capturer.capture.return_value = (giant_frame, (0, 0))
 
-    # When selling triggered, anchor resets to None
-    farm_engine._fixed_harvest_point = None
-    assert farm_engine._fixed_harvest_point is None
+    # Try harvesting with max_kg=1.04 (only the 1.03kg card would match from initial scan)
+    # But if verify frame is treated as heavy, veto triggers:
+    mock_heavy_card = MagicMock()
+    mock_heavy_card.btn_x, mock_heavy_card.btn_w = 0, 1920
+    mock_heavy_card.btn_y, mock_heavy_card.btn_h = 0, 1080
+    mock_heavy_card.weight = 4.85  # Heavy shifted crop!
+    
+    orig_scan = farm_engine.digit_reader.scan_cards
+    farm_engine.digit_reader.scan_cards = MagicMock(side_effect=[
+        orig_scan(b8),           # Initial scan (finds eligible card)
+        [mock_heavy_card],        # Verification capture right before click (detects heavy shifted card!)
+    ])
+
+    h_veto, s_veto = farm_engine.execute_harvest_round(b8, max_kg=2.0)
+    assert h_veto is False, "Must abort harvest when pre-click verification detects shifted heavy crop!"
+    assert len(clicks) == 0, "Mouse click MUST be vetoed and never fired!"
+
+
+def test_farm_engine_get_scrollbar_info(farm_engine):
+    im_bot = cv2.resize(cv2.imread(r"C:\Users\ACER\.gemini\antigravity\brain\6bf98727-89dc-4060-8a7f-c4d9602d9ce2\.user_uploaded\media_1793323706119_95ed675a.png"), (1920, 1080))
+    thumb_ratio, bottom_ratio, is_at_bottom = farm_engine.get_scrollbar_info(im_bot)
+    assert 0.5 <= thumb_ratio <= 0.9
+    assert bottom_ratio >= 0.95
+    assert is_at_bottom is True
 
 
 def test_count_sellable_crops_in_shop_detects_unlocked_and_ignores_empty_or_locked(farm_engine):
@@ -237,3 +262,23 @@ def test_handle_space_prompt_presses_space_without_mouse_click_on_error_popup(fa
     assert farm_engine.input_sim.press_key.called
     farm_engine.input_sim.press_key.assert_called_with("space")
     assert not farm_engine.input_sim.click.called, "Must NOT use mouse click on Space prompts!"
+
+
+def test_scroll_harvest_list_down_calls_drag_and_detects_shift(farm_engine):
+    im1 = cv2.resize(cv2.imread(r"C:\Users\ACER\.gemini\antigravity\brain\6bf98727-89dc-4060-8a7f-c4d9602d9ce2\.user_uploaded\media_1793287819965_f56904b4.png"), (1920, 1080))
+    im2 = cv2.resize(cv2.imread(r"C:\Users\ACER\.gemini\antigravity\brain\6bf98727-89dc-4060-8a7f-c4d9602d9ce2\.user_uploaded\media_1793287879880_51a16a10.png"), (1920, 1080))
+
+    # Mock capturer to return im2 after scroll
+    farm_engine.capturer.capture.return_value = (im2, (0, 0))
+
+    moved = farm_engine.scroll_harvest_list_down(im1)
+    assert moved is True
+    assert farm_engine.input_sim.drag.called
+    # Verify drag was called with swipe-up parameters (y0 > y1)
+    drag_args = farm_engine.input_sim.drag.call_args[0]
+    assert drag_args[1] > drag_args[3], f"Drag must swipe up (y0={drag_args[1]} > y1={drag_args[3]})"
+
+    # If frame doesn't change, returns False (stationary / bottom reached)
+    farm_engine.capturer.capture.return_value = (im2, (0, 0))
+    moved_stationary = farm_engine.scroll_harvest_list_down(im2)
+    assert moved_stationary is False

@@ -206,11 +206,38 @@ class InputSimulator:
         ctypes.windll.user32.keybd_event(vk, scancode, 2, 0)  # 2 = KEYEVENTF_KEYUP
         return True
 
-    def scroll(self, delta: int = -120) -> None:
+    def drag(self, x0: int, y0: int, x1: int, y1: int, duration_s: float = 0.22, steps: int = 12, ensure_focus: bool = True) -> None:
+        """
+        Simulates a mouse drag gesture from (x0, y0) to (x1, y1).
+        Essential for scrolling mobile-ported Unity ScrollRect lists reliably.
+        """
+        if ensure_focus:
+            self.focus_game_window()
+
+        ctypes.windll.user32.SetCursorPos(int(x0), int(y0))
+        time.sleep(0.04)
+        ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+        time.sleep(0.04)
+
+        for step in range(1, steps + 1):
+            t = step / float(steps)
+            cur_x = int(x0 + (x1 - x0) * t)
+            cur_y = int(y0 + (y1 - y0) * t)
+            ctypes.windll.user32.SetCursorPos(cur_x, cur_y)
+            time.sleep(duration_s / float(steps))
+
+        ctypes.windll.user32.SetCursorPos(int(x1), int(y1))
+        time.sleep(0.04)
+        ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+        time.sleep(0.15)
+
+    def scroll(self, delta: int = -120, ensure_focus: bool = True) -> None:
         """
         Simulates mouse wheel scrolling.
         delta: positive scrolls up, negative scrolls down (standard notch = -120).
         """
+        if ensure_focus:
+            self.focus_game_window()
         extra = ctypes.c_ulong(0)
         ii = INPUT_I()
         ii.mi = MOUSEINPUT(0, 0, ctypes.c_ulong(delta), MOUSEEVENTF_WHEEL, 0, ctypes.pointer(extra))

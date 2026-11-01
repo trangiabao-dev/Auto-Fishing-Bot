@@ -226,21 +226,26 @@ class FarmEngine:
 
         # Step 1: Teleport to Oliver if not yet done this run
         if not getattr(self, "_teleported_to_oliver", False):
-            hit_b1 = self.find_hud_sell_button(frame)
-            if hit_b1:
-                self._set_state(FarmState.TELEPORTING)
-                self._log("🚀 [BƯỚC 1] Bấm nút 'Bán' để dịch chuyển nhân vật tới trước mặt ông bán quả (Oliver)...")
-                self.click_rect(hit_b1)
+            # Nếu đã thấy icon giỏ hàng của Oliver (Hình 1), nhân vật đã đứng trước Oliver -> bỏ qua nút Bán, sang thẳng Thu hoạch
+            if self.find_template(frame, "oliver_basket", threshold=0.65) is not None:
+                self._log("ℹ️ [ĐÃ Ở TRƯỚC CỬA HÀNG] Đã đứng trước ông Oliver (thấy icon giỏ hàng)! Bỏ qua nút 'Bán', chuyển thẳng tới nút 'Thu hoạch'...")
                 self._teleported_to_oliver = True
-                time.sleep(2.0)
-                # If clicking Bán opened a shop modal, close it
-                f_after, _ = self.capturer.capture(None)
-                close_btn = self.find_close_button(f_after)
-                if close_btn and self.find_template(f_after, "sell_chon_tu_dong", threshold=0.75):
-                    self.click_rect(close_btn)
-                    time.sleep(0.8)
-                f_check, _ = self.capturer.capture(None)
-                frame = f_check
+            else:
+                hit_b1 = self.find_hud_sell_button(frame)
+                if hit_b1:
+                    self._set_state(FarmState.TELEPORTING)
+                    self._log("🚀 [BƯỚC 1] Bấm nút 'Bán' để dịch chuyển nhân vật tới trước mặt ông bán quả (Oliver)...")
+                    self.click_rect(hit_b1)
+                    self._teleported_to_oliver = True
+                    time.sleep(2.0)
+                    # If clicking Bán opened a shop modal, close it
+                    f_after, _ = self.capturer.capture(None)
+                    close_btn = self.find_close_button(f_after)
+                    if close_btn and self.find_template(f_after, "sell_chon_tu_dong", threshold=0.75):
+                        self.click_rect(close_btn)
+                        time.sleep(0.8)
+                    f_check, _ = self.capturer.capture(None)
+                    frame = f_check
 
         # Step 2: Click 'Thu hoạch' (B2.png) to open harvest cards
         hit_b2 = self.find_hud_harvest_button(frame)
@@ -598,6 +603,20 @@ class FarmEngine:
 
         return self.find_template(frame, "sell_confirm_high_tier", threshold=0.68)
 
+    def _has_harvest_button_near(self, frame: np.ndarray, pt: Tuple[int, int]) -> bool:
+        """Verifies if cyan harvest button color is present within a 30px radius of click point."""
+        cx, cy = pt
+        fh, fw = frame.shape[:2]
+        r = 30
+        x0, x1 = max(0, cx - r), min(fw, cx + r)
+        y0, y1 = max(0, cy - r), min(fh, cy + r)
+        roi = frame[y0:y1, x0:x1]
+        if roi.size == 0:
+            return False
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, np.array([90, 100, 100]), np.array([115, 255, 255]))
+        return float(np.mean(mask > 0)) >= 0.15
+
     def execute_harvest_round(self, frame: np.ndarray, max_kg: float) -> Tuple[bool, bool]:
         """
         Scans visible harvest cards with OCR.
@@ -619,26 +638,51 @@ class FarmEngine:
         # Check if we currently have a locked click point
         if self._fixed_harvest_point is not None:
             cx, cy = self._fixed_harvest_point
-            # Find the card under the fixed point
-            under = [c for c in cards if c.btn_x <= cx <= c.btn_x + c.btn_w and c.btn_y <= cy <= c.btn_y + c.btn_h]
-            if not under:
-                # Slot became empty / white space
-                self._log("ℹ️ [ĐỔI VỊ TRÍ] Vị trí ô thu hoạch cũ đã trống (khoảng trắng)! Đang chọn random nút thu hoạch khác...")
-                self._fixed_harvest_point = None
-            else:
-                card = under[0]
-                if card.weight >= max_kg or card.weight <= 0.0:
-                    self._log(f"🛡️ [VETO BẢO VỆ] Quả dồn vào ô cố định ({cx},{cy}) là {card.weight:.2f}kg >= {max_kg:.2f}kg! Hủy click bảo vệ quả lớn, chuyển sang nút khác...")
+
+            # Check if harvest button has disappeared completely (empty slot / white space)
+            if not self._has_harvest_button_near(frame, (cx, cy)):
+                # Double-check confirmation to avoid false reset during animation settling
+                time.sleep(0.15)
+                f_confirm, _ = self.capturer.capture(None)
+                if not self._has_harvest_button_near(f_confirm, (cx, cy)):
+                    self._log("ℹ️ [ĐỔI VỊ TRÍ] Ô thu hoạch cố định đã hết quả (trở thành khoảng trắng)! Đang chọn random nút thu hoạch khác...")
                     self._fixed_harvest_point = None
-                elif card.is_clipped:
-                    self._fixed_harvest_point = None
+                    self._fixed_point_unsettled_count = 0
+
+            if self._fixed_harvest_point is not None:
+                under = [c for c in cards if c.btn_x <= cx <= c.btn_x + c.btn_w and c.btn_y <= cy <= c.btn_y + c.btn_h]
+                if under:
+                    card = under[0]
+                    if 0.0 < card.weight < max_kg and not card.is_clipped:
+                        self._fixed_point_unsettled_count = 0
+                        self._log(f"🧺 [THU HOẠCH] Đang thu ô #{card.card_index}: {card.weight:.2f}kg (< {max_kg:.2f}kg) tại ({cx}, {cy})...")
+                        self.input_sim.click(cx, cy, hold_min_ms=25, hold_max_ms=45)
+                        self.stats["harvested_count"] += 1
+                        time.sleep(max(self.cfg_mgr.shift_delay_s, 0.25))
+                        return True, False
+                    elif card.weight >= max_kg and card.weight < 9000.0:
+                        self._log(f"🛡️ [VETO BẢO VỆ] Quả dồn vào ô cố định ({cx},{cy}) là {card.weight:.2f}kg >= {max_kg:.2f}kg! Hủy click bảo vệ quả lớn, chuyển sang nút khác...")
+                        self._fixed_harvest_point = None
+                        self._fixed_point_unsettled_count = 0
+                    else:
+                        # Card is mid-shift, unreadable (9999.0) or clipped: retry max 3 frames (~0.3s) before releasing slot
+                        self._fixed_point_unsettled_count = getattr(self, "_fixed_point_unsettled_count", 0) + 1
+                        if self._fixed_point_unsettled_count >= 3:
+                            self._log(f"🛡️ [BẢO VỆ AN TOÀN] Ô cố định ({cx},{cy}) không thể xác định số kg an toàn ({card.weight:.2f}kg)! Đổi sang vị trí khác để tránh thu nhầm...")
+                            self._fixed_harvest_point = None
+                            self._fixed_point_unsettled_count = 0
+                        else:
+                            time.sleep(0.10)
+                            return False, False
                 else:
-                    # Valid eligible card under fixed point: Keep clicking this exact coordinate!
-                    self._log(f"🧺 [THU HOẠCH] Đang thu ô #{card.card_index}: {card.weight:.2f}kg (< {max_kg:.2f}kg) tại ({cx}, {cy})...")
-                    self.input_sim.click(cx, cy, hold_min_ms=25, hold_max_ms=45)
-                    self.stats["harvested_count"] += 1
-                    time.sleep(max(self.cfg_mgr.shift_delay_s, 0.65))
-                    return True, False
+                    self._fixed_point_unsettled_count = getattr(self, "_fixed_point_unsettled_count", 0) + 1
+                    if self._fixed_point_unsettled_count >= 3:
+                        self._log(f"ℹ️ [ĐỔI VỊ TRÍ] Không tìm thấy thẻ quả tại ô cố định ({cx},{cy}) sau 3 lần quét! Đang chọn vị trí khác...")
+                        self._fixed_harvest_point = None
+                        self._fixed_point_unsettled_count = 0
+                    else:
+                        time.sleep(0.10)
+                        return False, False
 
         # If _fixed_harvest_point is None (first time after filter, or after white space / veto)
         eligible = [c for c in cards if 0.0 < c.weight < max_kg and not c.is_clipped]
@@ -649,7 +693,7 @@ class FarmEngine:
             self._log(f"🎯 [CỐ ĐỊNH NÚT] Đã random chọn ô #{target.card_index} ({target.weight:.2f}kg) tại ({cx}, {cy}) để thu hoạch liên tục...")
             self.input_sim.click(cx, cy, hold_min_ms=25, hold_max_ms=45)
             self.stats["harvested_count"] += 1
-            time.sleep(max(self.cfg_mgr.shift_delay_s, 0.65))
+            time.sleep(max(self.cfg_mgr.shift_delay_s, 0.25))
             return True, False
         else:
             self._fixed_harvest_point = None
@@ -683,7 +727,7 @@ class FarmEngine:
                 self._log(f"⚡ [THU HOẠCH TỰ DO] Thu ô #{target.card_index} tại ({cx}, {cy})...")
                 self.input_sim.click(cx, cy, hold_min_ms=25, hold_max_ms=45)
                 self.stats["harvested_count"] += 1
-                time.sleep(max(self.cfg_mgr.shift_delay_s, 0.50))
+                time.sleep(max(self.cfg_mgr.shift_delay_s, 0.20))
                 return True, False
 
         # If _fixed_harvest_point is None: pick random actionable card
@@ -694,7 +738,7 @@ class FarmEngine:
             self._log(f"🎯 [CỐ ĐỊNH NÚT TỰ DO] Đã random chọn ô #{target.card_index} tại ({cx}, {cy}) để thu hoạch liên tục...")
             self.input_sim.click(cx, cy, hold_min_ms=25, hold_max_ms=45)
             self.stats["harvested_count"] += 1
-            time.sleep(max(self.cfg_mgr.shift_delay_s, 0.50))
+            time.sleep(max(self.cfg_mgr.shift_delay_s, 0.20))
             return True, False
 
         tpl = self._templates.get("btn_thu_hoach")
@@ -715,7 +759,7 @@ class FarmEngine:
                 self.input_sim.click(rx, ry, hold_min_ms=25, hold_max_ms=45)
                 self.stats["harvested_count"] += 1
                 self._log(f"⚡ [THU HOẠCH TỰ DO] Cố định nút tại ({rx}, {ry})...")
-                time.sleep(max(self.cfg_mgr.shift_delay_s, 0.50))
+                time.sleep(max(self.cfg_mgr.shift_delay_s, 0.20))
                 return True, False
 
         self._fixed_harvest_point = None
@@ -890,7 +934,7 @@ class FarmEngine:
             self.find_template(f_shop, "sell_coin_btn", threshold=0.68) is not None
         )
         if not in_shop:
-            btn_crops = self.find_template(f_shop, "oliver_sell_crops", threshold=0.70)
+            btn_crops = self.find_template(f_shop, "oliver_sell_crops", threshold=0.65)
             if btn_crops:
                 self.click_rect(btn_crops)
                 time.sleep(1.0)
@@ -921,24 +965,23 @@ class FarmEngine:
                 # Shop modal not open or already finished
                 break
 
-            # Pre-scan: Check if there are any sellable (unlocked) crops on the shop grid
+            # Click '(0/100) Chọn tự động' to let the game select sellable crops
             sellable_count = self.count_sellable_crops_in_shop(f_cur)
-            if sellable_count == 0:
-                if total_batches_sold > 0:
-                    self._log("✨ [BÁN XONG] Lưới cửa hàng đã sạch (không còn nông sản mở khóa để bán)! Kết thúc đợt bán.")
-                else:
-                    self._log("⚠️ [CỬA HÀNG] Không có nông sản nào có thể bán trên lưới! Đóng cửa hàng...")
-                break
-
-            self._log(f" -> Đợt {batch_idx}: Thấy {sellable_count} ô nông sản có thể bán! Bấm '(0/100) Chọn tự động'...")
+            if sellable_count > 0:
+                self._log(f" -> Đợt {batch_idx}: Thấy {sellable_count} ô nông sản có thể bán! Bấm '(0/100) Chọn tự động'...")
+            else:
+                self._log(f" -> Đợt {batch_idx}: Bấm '(0/100) Chọn tự động' để chọn nông sản...")
             self.click_rect(auto_btn)
             time.sleep(0.6)
 
-            # Check if coin button is active with items to sell
+            # Check if coin button is active with items to sell (active: ~0.99, inactive/0 items: ~0.62)
             f_coin, _ = self.capturer.capture(None)
             coin_btn = self.find_template(f_coin, "sell_coin_btn", threshold=0.68)
             if not coin_btn:
-                self._log(f" -> Đợt {batch_idx}: Không còn nông sản nào có thể bán! Túi đồ đã sạch.")
+                if total_batches_sold > 0:
+                    self._log(f"✨ [BÁN XONG] Lưới cửa hàng đã sạch! Túi đồ đã bán hết.")
+                else:
+                    self._log(f"ℹ️ [CỬA HÀNG] Không có nông sản nào được chọn để bán (hoặc nông sản đã bị khóa)! Đóng cửa hàng...")
                 break
 
             # Click coin button to proceed to sell
@@ -1011,8 +1054,12 @@ class FarmEngine:
             f_dlg, _ = self.capturer.capture(None)
             if self.find_hud_harvest_button(f_dlg) is not None or self.find_hud_sell_button(f_dlg) is not None:
                 break  # HUD already visible and clean
-            self._log(" -> Đóng lời thoại ông Oliver (bấm Space)...")
-            self.input_sim.press_key("space")
+            if self.find_template(f_dlg, "oliver_sell_crops", threshold=0.65) or self.find_template(f_dlg, "oliver_basket", threshold=0.65):
+                self._log(" -> Đóng hội thoại lựa chọn của Oliver (bấm ESC)...")
+                self.input_sim.press_key("esc")
+            else:
+                self._log(" -> Đóng lời thoại ông Oliver (bấm ESC)...")
+                self.input_sim.press_key("esc")
             time.sleep(0.8)
 
         # Zero Space keypresses: Character will NEVER jump in 3D world!
@@ -1243,18 +1290,23 @@ class FarmEngine:
                 hit_b1 = self.find_hud_sell_button(frame)
                 hit_b2 = self.find_hud_harvest_button(frame)
 
-                if not getattr(self, "_teleported_to_oliver", False) and hit_b1:
-                    self._set_state(FarmState.TELEPORTING)
-                    self._log("🚀 [BƯỚC 1] Thấy nút 'Bán' trên HUD! Bấm để dịch chuyển nhân vật tới trước mặt ông bán quả (Oliver)...")
-                    self.click_rect(hit_b1)
-                    self._teleported_to_oliver = True
-                    time.sleep(2.0)
-                    f_chk, _ = self.capturer.capture(None)
-                    close_btn = self.find_close_button(f_chk)
-                    if close_btn and self.find_template(f_chk, "sell_chon_tu_dong", threshold=0.75):
-                        self.click_rect(close_btn)
-                        time.sleep(0.8)
-                    continue
+                if not getattr(self, "_teleported_to_oliver", False):
+                    # Nếu đã thấy icon giỏ hàng của Oliver (Hình 1), nhân vật đã đứng trước Oliver -> bỏ qua nút Bán, sang thẳng Thu hoạch
+                    if self.find_template(frame, "oliver_basket", threshold=0.65) is not None:
+                        self._log("ℹ️ [ĐÃ Ở TRƯỚC CỬA HÀNG] Đã đứng trước ông Oliver (thấy icon giỏ hàng)! Bỏ qua nút 'Bán', chuyển thẳng tới nút 'Thu hoạch'...")
+                        self._teleported_to_oliver = True
+                    elif hit_b1:
+                        self._set_state(FarmState.TELEPORTING)
+                        self._log("🚀 [BƯỚC 1] Thấy nút 'Bán' trên HUD! Bấm để dịch chuyển nhân vật tới trước mặt ông bán quả (Oliver)...")
+                        self.click_rect(hit_b1)
+                        self._teleported_to_oliver = True
+                        time.sleep(2.0)
+                        f_chk, _ = self.capturer.capture(None)
+                        close_btn = self.find_close_button(f_chk)
+                        if close_btn and self.find_template(f_chk, "sell_chon_tu_dong", threshold=0.75):
+                            self.click_rect(close_btn)
+                            time.sleep(0.8)
+                        continue
 
                 if hit_b2:
                     self._set_state(FarmState.OPENING_HARVEST)
@@ -1430,18 +1482,23 @@ class FarmEngine:
                 hit_b1 = self.find_hud_sell_button(frame)
                 hit_b2 = self.find_hud_harvest_button(frame)
 
-                if not getattr(self, "_teleported_to_oliver", False) and hit_b1:
-                    self._set_state(FarmState.TELEPORTING)
-                    self._log("🚀 [BƯỚC 1] Thấy nút 'Bán' trên HUD! Bấm để dịch chuyển nhân vật tới trước mặt ông bán quả (Oliver)...")
-                    self.click_rect(hit_b1)
-                    self._teleported_to_oliver = True
-                    time.sleep(2.0)
-                    f_chk, _ = self.capturer.capture(None)
-                    close_btn = self.find_close_button(f_chk)
-                    if close_btn and self.find_template(f_chk, "sell_chon_tu_dong", threshold=0.75):
-                        self.click_rect(close_btn)
-                        time.sleep(0.8)
-                    continue
+                if not getattr(self, "_teleported_to_oliver", False):
+                    # Nếu đã thấy icon giỏ hàng của Oliver (Hình 1), nhân vật đã đứng trước Oliver -> bỏ qua nút Bán, sang thẳng Thu hoạch
+                    if self.find_template(frame, "oliver_basket", threshold=0.65) is not None:
+                        self._log("ℹ️ [ĐÃ Ở TRƯỚC CỬA HÀNG] Đã đứng trước ông Oliver (thấy icon giỏ hàng)! Bỏ qua nút 'Bán', chuyển thẳng tới nút 'Thu hoạch'...")
+                        self._teleported_to_oliver = True
+                    elif hit_b1:
+                        self._set_state(FarmState.TELEPORTING)
+                        self._log("🚀 [BƯỚC 1] Thấy nút 'Bán' trên HUD! Bấm để dịch chuyển nhân vật tới trước mặt ông bán quả (Oliver)...")
+                        self.click_rect(hit_b1)
+                        self._teleported_to_oliver = True
+                        time.sleep(2.0)
+                        f_chk, _ = self.capturer.capture(None)
+                        close_btn = self.find_close_button(f_chk)
+                        if close_btn and self.find_template(f_chk, "sell_chon_tu_dong", threshold=0.75):
+                            self.click_rect(close_btn)
+                            time.sleep(0.8)
+                        continue
 
                 if hit_b2:
                     self._set_state(FarmState.OPENING_HARVEST)

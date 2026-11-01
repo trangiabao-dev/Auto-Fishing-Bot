@@ -14,6 +14,9 @@ def test_card_pack_templates_match_user_images():
     p2 = r"C:/Users/ACER/.gemini/antigravity/brain/6bf98727-89dc-4060-8a7f-c4d9602d9ce2/.user_uploaded/media_1793111639249_16731e28.png"
     p3 = r"C:/Users/ACER/.gemini/antigravity/brain/6bf98727-89dc-4060-8a7f-c4d9602d9ce2/.user_uploaded/media_1793111645039_8f905770.png"
 
+    if not (os.path.exists(p1) and os.path.exists(p2) and os.path.exists(p3)):
+        pytest.skip("Test images from previous conversation not available on disk")
+
     im1 = cv2.resize(cv2.imread(p1), (1920, 1080))
     im2 = cv2.resize(cv2.imread(p2), (1920, 1080))
     im3 = cv2.resize(cv2.imread(p3), (1920, 1080))

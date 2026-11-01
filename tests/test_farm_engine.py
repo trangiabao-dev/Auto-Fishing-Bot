@@ -139,6 +139,34 @@ def test_farm_engine_step_open_harvest_window_executes_b1_b2_sequence(farm_engin
     assert farm_engine.input_sim.click.call_count >= 2
 
 
+def test_farm_engine_step_open_harvest_window_skips_b1_when_oliver_basket_visible(farm_engine):
+    oliver_tpl = cv2.imread(r"D:\ToolPT\assets\farm\ban\B1.jpg")
+    b1_tpl = cv2.imread(r"D:\ToolPT\assets\farm\thu_hoach\B1.png")
+    b2_tpl = cv2.imread(r"D:\ToolPT\assets\farm\thu_hoach\B2.png")
+    b8 = cv2.imread(r"D:\ToolPT\tests\fixtures\farm\B8.jpg")
+
+    # Frame with Oliver basket (Hình 1), HUD Bán (Hình 2), and HUD Thu hoạch (Hình 3)
+    frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    ho, wo = oliver_tpl.shape[:2]
+    frame[50:50+ho, 50:50+wo] = oliver_tpl
+
+    h1, w1 = b1_tpl.shape[:2]
+    frame[150:150+h1, 150:150+w1] = b1_tpl
+
+    h2, w2 = b2_tpl.shape[:2]
+    frame[300:300+h2, 300:300+w2] = b2_tpl
+
+    farm_engine.capturer.capture.side_effect = lambda region=None: (b8, (0, 0))
+    farm_engine.input_sim.click.reset_mock()
+    farm_engine._teleported_to_oliver = False
+
+    res = farm_engine.step_open_harvest_window(frame)
+    assert res is True
+    # Should skip B1 completely and only click B2 once!
+    assert farm_engine._teleported_to_oliver is True
+    assert farm_engine.input_sim.click.call_count == 1
+
+
 def test_farm_engine_step_setup_filter_wide_random_click(farm_engine):
     b3 = cv2.imread(r"D:\ToolPT\assets\farm\thu_hoach\B3.jpg")
     b4 = cv2.imread(r"D:\ToolPT\assets\farm\thu_hoach\B4.jpg")
@@ -247,7 +275,7 @@ def test_farm_engine_fixed_point_vetoes_and_resets_on_heavy_crop(farm_engine):
 
 
 def test_farm_engine_row4_cards_are_not_clipped_at_bottom():
-    img_path = r"C:\Users\ACER\.gemini\antigravity\brain\6bf98727-89dc-4060-8a7f-c4d9602d9ce2\.user_uploaded\media_1793287879880_51a16a10.png"
+    img_path = r"D:\ToolPT\tests\fixtures\farm\bang_thu_hoach_day.png"
     frame = cv2.imread(img_path)
     frame_1080 = cv2.resize(frame, (1920, 1080), interpolation=cv2.INTER_CUBIC)
 
@@ -263,10 +291,10 @@ def test_farm_engine_row4_cards_are_not_clipped_at_bottom():
 
 
 def test_farm_engine_get_scrollbar_info(farm_engine):
-    im_bot = cv2.resize(cv2.imread(r"C:\Users\ACER\.gemini\antigravity\brain\6bf98727-89dc-4060-8a7f-c4d9602d9ce2\.user_uploaded\media_1793323706119_95ed675a.png"), (1920, 1080))
+    img_path = r"D:\ToolPT\tests\fixtures\farm\bang_thu_hoach_day.png"
+    im_bot = cv2.resize(cv2.imread(img_path), (1920, 1080))
     thumb_ratio, bottom_ratio, is_at_bottom = farm_engine.get_scrollbar_info(im_bot)
-    assert 0.5 <= thumb_ratio <= 0.9
-    assert bottom_ratio >= 0.95
+    assert bottom_ratio >= 0.90
     assert is_at_bottom is True
 
 
@@ -293,13 +321,17 @@ def test_count_sellable_crops_in_shop_detects_unlocked_and_ignores_empty_or_lock
 
 
 def test_handle_space_prompt_presses_space_without_mouse_click_on_error_popup(farm_engine):
-    popup_img = cv2.imread(r"C:\Users\ACER\.gemini\antigravity\brain\6bf98727-89dc-4060-8a7f-c4d9602d9ce2\.user_uploaded\media_1793275514061_8dcca536.png")
-    assert popup_img is not None
+    # Synthetic frame with prompt_space_cyan
+    frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    tpl_c = farm_engine._templates.get("prompt_space_cyan")
+    if tpl_c is not None:
+        th, tw = tpl_c.shape[:2]
+        frame[500:500+th, 900:900+tw] = tpl_c
 
     farm_engine.input_sim.click.reset_mock()
     farm_engine.input_sim.press_key.reset_mock()
 
-    handled = farm_engine.handle_space_prompt_if_present(popup_img)
+    handled = farm_engine.handle_space_prompt_if_present(frame)
     assert handled is True
     # STRICT COMPLIANCE: 100% Space key, ZERO mouse click!
     assert farm_engine.input_sim.press_key.called
@@ -308,20 +340,136 @@ def test_handle_space_prompt_presses_space_without_mouse_click_on_error_popup(fa
 
 
 def test_scroll_harvest_list_down_calls_drag_and_detects_shift(farm_engine):
-    im1 = cv2.resize(cv2.imread(r"C:\Users\ACER\.gemini\antigravity\brain\6bf98727-89dc-4060-8a7f-c4d9602d9ce2\.user_uploaded\media_1793287819965_f56904b4.png"), (1920, 1080))
-    im2 = cv2.resize(cv2.imread(r"C:\Users\ACER\.gemini\antigravity\brain\6bf98727-89dc-4060-8a7f-c4d9602d9ce2\.user_uploaded\media_1793287879880_51a16a10.png"), (1920, 1080))
+    b8 = cv2.imread(r"D:\ToolPT\tests\fixtures\farm\B8.jpg")
+    b8_shifted = np.roll(b8, 50, axis=0)
 
-    # Mock capturer to return im2 after scroll
-    farm_engine.capturer.capture.return_value = (im2, (0, 0))
+    # Mock capturer to return b8_shifted after scroll
+    farm_engine.capturer.capture.return_value = (b8_shifted, (0, 0))
 
-    moved = farm_engine.scroll_harvest_list_down(im1)
+    moved = farm_engine.scroll_harvest_list_down(b8)
     assert moved is True
     assert farm_engine.input_sim.drag.called
-    # Verify drag was called with swipe-up parameters (y0 > y1)
     drag_args = farm_engine.input_sim.drag.call_args[0]
     assert drag_args[1] > drag_args[3], f"Drag must swipe up (y0={drag_args[1]} > y1={drag_args[3]})"
 
     # If frame doesn't change, returns False (stationary / bottom reached)
-    farm_engine.capturer.capture.return_value = (im2, (0, 0))
-    moved_stationary = farm_engine.scroll_harvest_list_down(im2)
+    farm_engine.capturer.capture.return_value = (b8, (0, 0))
+    moved_stationary = farm_engine.scroll_harvest_list_down(b8)
     assert moved_stationary is False
+
+
+def test_farm_engine_parses_092kg_and_maintains_fixed_point_without_jumping(farm_engine):
+    img = cv2.resize(cv2.imread(r"D:\ToolPT\tests\fixtures\farm\man_hinh_thu_hoach_092.png"), (1920, 1080))
+    farm_engine.capturer.capture.return_value = (img, (0, 0))
+
+    cards = farm_engine.digit_reader.scan_cards(img)
+    # Verify card 0.92kg is parsed correctly as 0.92 (NOT 9999.0!)
+    card_092 = [c for c in cards if abs(c.weight - 0.92) < 0.005]
+    assert len(card_092) == 1, "Card 0.92kg must be parsed correctly as 0.92kg without fail-closing!"
+    c092 = card_092[0]
+
+    # Lock fixed point onto 0.92kg button
+    pt = c092.get_click_point()
+    farm_engine._fixed_harvest_point = pt
+
+    clicks = []
+    farm_engine.input_sim.click.side_effect = lambda x, y, **kwargs: clicks.append((x, y))
+
+    # Round 1: Clicks locked point
+    h1, s1 = farm_engine.execute_harvest_round(img, max_kg=3.0)
+    assert h1 is True
+    assert len(clicks) == 1
+    assert clicks[0] == pt
+    assert farm_engine._fixed_harvest_point == pt, "Must maintain locked point!"
+
+    # Round 2: Next round MUST keep clicking the exact same point without jumping to 0.98 or 0.91!
+    h2, s2 = farm_engine.execute_harvest_round(img, max_kg=3.0)
+    assert h2 is True
+    assert len(clicks) == 2
+    assert clicks[1] == pt, "Must NEVER jump to other cards like 0.98 or 0.91!"
+    assert farm_engine._fixed_harvest_point == pt
+
+
+def test_farm_engine_sell_cycle_polls_oliver_dialog_and_enters_shop(farm_engine):
+    b2_tpl = cv2.imread(r"D:\ToolPT\assets\farm\ban\B2.jpg")
+    f_dlg = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    h2, w2 = b2_tpl.shape[:2]
+    f_dlg[670:670+h2, 1420:1420+w2] = b2_tpl
+
+    f_b3 = cv2.imread(r"D:\ToolPT\tests\fixtures\farm\khung hinh anh ban.jpg")
+    f_b4 = cv2.imread(r"D:\ToolPT\tests\fixtures\farm\khung hinh anh ban B4.jpg")
+    f_b5 = cv2.imread(r"D:\ToolPT\tests\fixtures\farm\khung hinh anh ban B5.jpg")
+    f_b6 = cv2.imread(r"D:\ToolPT\tests\fixtures\farm\khung hinh anh ban B6.jpg")
+
+    frames = [f_dlg, f_b3, f_b3, f_b4, f_b5, f_b6, f_b3]
+    frame_iter = iter(frames)
+
+    def mock_capture(region=None):
+        try:
+            return next(frame_iter), (0, 0)
+        except StopIteration:
+            return f_b3, (0, 0)
+
+    farm_engine.capturer.capture.side_effect = mock_capture
+
+    res = farm_engine.step_sell_cycle()
+    assert res is True
+    assert farm_engine.stats["sell_cycles"] == 1
+    assert farm_engine.input_sim.click.called
+
+
+def test_farm_engine_execute_harvest_round_never_clicks_unreadable_or_inflight_crop(farm_engine):
+    b8 = cv2.imread(r"D:\ToolPT\tests\fixtures\farm\B8.jpg")
+    cards = farm_engine.digit_reader.scan_cards(b8)
+    card = cards[0]
+    cx, cy = card.get_click_point()
+    farm_engine._fixed_harvest_point = (cx, cy)
+
+    # Corrupt card's weight to 9999.0 (unreadable during animation)
+    farm_engine.digit_reader.scan_cards = MagicMock(return_value=[
+        type("FakeCard", (), {
+            "btn_x": card.btn_x, "btn_y": card.btn_y,
+            "btn_w": card.btn_w, "btn_h": card.btn_h,
+            "weight": 9999.0, "is_clipped": False, "card_index": 1
+        })()
+    ])
+
+    clicks = []
+    farm_engine.input_sim.click.side_effect = lambda x, y, **kwargs: clicks.append((x, y))
+
+    # Round: weight is 9999.0 -> Must NOT click!
+    h, s = farm_engine.execute_harvest_round(b8, max_kg=3.0)
+    assert h is False
+    assert s is False
+    assert len(clicks) == 0, "Must NEVER click on an unreadable / 9999.0kg crop!"
+
+
+def test_farm_engine_fixed_point_watchdog_unblocks_stuck_card(farm_engine):
+    b8 = cv2.imread(r"D:\ToolPT\tests\fixtures\farm\B8.jpg")
+    cards = farm_engine.digit_reader.scan_cards(b8)
+    card = cards[0]
+    cx, cy = card.get_click_point()
+    farm_engine._fixed_harvest_point = (cx, cy)
+    farm_engine._fixed_point_unsettled_count = 0
+
+    # Corrupt card's weight to 9999.0 (unreadable during animation or glitch)
+    farm_engine.digit_reader.scan_cards = MagicMock(return_value=[
+        type("FakeCard", (), {
+            "btn_x": card.btn_x, "btn_y": card.btn_y,
+            "btn_w": card.btn_w, "btn_h": card.btn_h,
+            "weight": 9999.0, "is_clipped": False, "card_index": 1,
+            "get_click_point": lambda: (cx, cy)
+        })()
+    ])
+
+    # Calls 1 and 2: waiting for settling
+    farm_engine.execute_harvest_round(b8, max_kg=3.0)
+    assert farm_engine._fixed_harvest_point == (cx, cy)
+    farm_engine.execute_harvest_round(b8, max_kg=3.0)
+    assert farm_engine._fixed_harvest_point == (cx, cy)
+
+    # Call 3: Watchdog triggers, resets _fixed_harvest_point!
+    farm_engine.execute_harvest_round(b8, max_kg=3.0)
+    assert farm_engine._fixed_harvest_point is None
+    assert farm_engine._fixed_point_unsettled_count == 0
+

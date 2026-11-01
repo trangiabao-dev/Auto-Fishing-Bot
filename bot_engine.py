@@ -103,8 +103,8 @@ class BotEngine:
             ScanTarget("done_title",   tpls.get("b4_hoan_thanh_title", "assets/B4_SuaCan/title_hoan_thanh"), (0.15, 0.05, 0.85, 0.85), ths.get("b4_sua_can", 0.70)),
             ScanTarget("ok",           tpls.get("b4_ok_btn", "assets/B4_SuaCan/btn_ok"),       (0.20, 0.40, 0.80, 0.90), ths.get("b4_btn_ok", 0.70)),
             ScanTarget("keep",         tpls.get("b3_bao_quan", "assets/B3_BaoQuan"),          (0.65, 0.65, 0.95, 0.95), ths.get("b3_bao_quan", 0.70)),
-            ScanTarget("reel",         tpls.get("b2_giat_can", "assets/B2_DangCau/nut_giat_can.png"), (0.65, 0.55, 1.00, 1.00), ths.get("b2_giat_can", 0.70)),
-            ScanTarget("cast",         tpls.get("b1_quang_can", "assets/B1_QuangCan"),         (0.65, 0.55, 1.00, 1.00), ths.get("b1_quang_can", 0.70)),
+            ScanTarget("reel",         tpls.get("b2_giat_can", "assets/B2_DangCau"),          (0.65, 0.55, 1.00, 1.00), ths.get("b2_giat_can", 0.60)),
+            ScanTarget("cast",         tpls.get("b1_quang_can", "assets/B1_QuangCan"),         (0.75, 0.60, 0.95, 0.80), ths.get("b1_quang_can", 0.70)),
             ScanTarget("card_open",    tpls.get("b6_btn_mo", "assets/B6_GoiThe/btn_mo.png"),   (0.70, 0.65, 0.98, 0.95), ths.get("b6_goi_the", 0.70)),
             ScanTarget("card_prompt",  tpls.get("b6_prompt_space", "assets/B6_GoiThe/prompt_space.png"), (0.35, 0.85, 0.65, 1.00), ths.get("b6_goi_the", 0.70)),
             ScanTarget("card_title",   tpls.get("b6_title_ketqua", "assets/B6_GoiThe/title_ketqua.png"), (0.35, 0.08, 0.65, 0.28), ths.get("b6_goi_the", 0.70)),
@@ -504,9 +504,8 @@ class BotEngine:
                                 self._log(f" -> Đã thấy nút Quăng Cần ({match1.template_name}, độ khớp {match1.confidence:.2f}). Bấm phím F để quăng cần (DirectInput, né chuột 100%)...")
                                 self.input_sim.press_key("f", hold_min_ms=60, hold_max_ms=100)
                             else:
-                                click_pt = self.cast_guard.get_safe_click_point(cand_center, max_radius=20)
-                                self._log(f"⚠️ [HỤT LỆNH PHÍM F - LẦN {cast_attempt}] Game hiển thị icon chuột (🖱️). Kích hoạt Fallback click chuột an toàn tại {click_pt} (né nút X > 115px)...")
-                                self.input_sim.click(click_pt[0], click_pt[1])
+                                self._log(f"⚠️ [THỬ LẠI QUĂNG CẦN - LẦN {cast_attempt}] Giữ phím F lâu hơn (150ms) để chắc chắn quăng cần (DirectInput, né chuột 100%)...")
+                                self.input_sim.press_key("f", hold_min_ms=120, hold_max_ms=180)
 
                             # Phản xạ nhận thức vòng kín (Closed-Loop Post-Action Verification):
                             # Không nhảy mù quáng sang BƯỚC 2. Quan sát phản hồi thực tế của game ngay sau khi bấm F!
@@ -565,11 +564,16 @@ class BotEngine:
                                     cast_disappear_count = 0
 
                             if cast_confirmed:
+                                self._f_miss_count = 0
                                 time.sleep(random.uniform(0.15, 0.25))
                                 break
 
-                            # Nếu sau 1.2s nút quăng cần vẫn còn và không có gì thay đổi: bấm F bị miss / lag
-                            self._log("⚠️ [HỤT LỆNH / LAG] Bấm F nhưng nút Quăng Cần vẫn còn nguyên và không có phản hồi! Giữ BƯỚC 1 thử lại...")
+                            # Nếu sau 1.2s nút quăng cần vẫn còn và không có gì thay đổi: bấm F bị miss / lag / chưa cầm cần
+                            self._f_miss_count = getattr(self, "_f_miss_count", 0) + 1
+                            if self._f_miss_count >= 3:
+                                self._log("⚠️ [CHƯA CẦM CẦN CÂU?] Bấm F liên tiếp nhưng không có phản hồi! Hãy chắc chắn nhân vật ĐANG CẦM CẦN CÂU TRÊN TAY [chọn cần câu trên thanh hotbar]!")
+                            else:
+                                self._log("⚠️ [HỤT LỆNH / LAG] Bấm F nhưng nút Quăng Cần vẫn còn nguyên và không có phản hồi! Giữ BƯỚC 1 thử lại...")
                             time.sleep(random.uniform(0.3, 0.5))
 
                         # Watchdog kiểm tra kẹt

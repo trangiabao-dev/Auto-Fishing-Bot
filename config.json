@@ -18,8 +18,8 @@
     "b6_btn_ok": "assets/B6_GoiThe/btn_ok_card.png"
   },
   "thresholds": {
-    "b1_quang_can": 0.65,
-    "b2_giat_can": 0.6,
+    "b1_quang_can": 0.72,
+    "b2_giat_can": 0.75,
     "b2_cham_than": 0.8,
     "b2_vat_neo": 0.7,
     "b3_bao_quan": 0.7,

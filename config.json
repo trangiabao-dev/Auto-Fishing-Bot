@@ -1,7 +1,7 @@
 {
   "templates": {
     "b1_quang_can": "assets/B1_QuangCan",
-    "b2_giat_can": "assets/B2_DangCau/nut_giat_can.png",
+    "b2_giat_can": "assets/B2_DangCau",
     "b2_cham_than": "assets/B2_DangCau/dau_cham_than",
     "b2_vat_neo": "assets/B2_DangCau/vat_neo_ten/columbinaa.png",
     "b3_bao_quan": "assets/B3_BaoQuan",
@@ -19,7 +19,7 @@
   },
   "thresholds": {
     "b1_quang_can": 0.72,
-    "b2_giat_can": 0.75,
+    "b2_giat_can": 0.65,
     "b2_cham_than": 0.8,
     "b2_vat_neo": 0.7,
     "b3_bao_quan": 0.7,

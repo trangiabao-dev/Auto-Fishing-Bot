@@ -473,3 +473,241 @@ def test_farm_engine_fixed_point_watchdog_unblocks_stuck_card(farm_engine):
     assert farm_engine._fixed_harvest_point is None
     assert farm_engine._fixed_point_unsettled_count == 0
 
+
+def test_can_harvest_list_scroll_guards(farm_engine):
+    b8 = cv2.imread(r"D:\ToolPT\tests\fixtures\farm\B8.jpg")
+    
+    # 1. Empty cards -> False
+    assert farm_engine.can_harvest_list_scroll([], b8) is False
+
+    # 2. Fewer than 6 cards (e.g. 5 cards like Mango user screenshot) -> False
+    fake_cards_5 = [
+        type("FakeCard", (), {"btn_x": 100, "btn_y": 200 + i * 130, "btn_w": 140, "btn_h": 85, "weight": 0.55, "is_clipped": False})()
+        for i in range(5)
+    ]
+    assert farm_engine.can_harvest_list_scroll(fake_cards_5, b8) is False
+
+    # 3. Odd number of cards (e.g. 7 cards, incomplete row) -> False
+    fake_cards_7 = [
+        type("FakeCard", (), {"btn_x": 100, "btn_y": 200 + i * 65, "btn_w": 140, "btn_h": 85, "weight": 0.55, "is_clipped": False})()
+        for i in range(7)
+    ]
+    assert farm_engine.can_harvest_list_scroll(fake_cards_7, b8) is False
+
+    # 4. Scrollbar at bottom -> False
+    farm_engine.get_scrollbar_info = MagicMock(return_value=(0.3, 0.98, True))
+    fake_cards_8 = [
+        type("FakeCard", (), {"btn_x": 100, "btn_y": 200 + i * 65, "btn_w": 140, "btn_h": 85, "weight": 0.55, "is_clipped": False})()
+        for i in range(8)
+    ]
+    assert farm_engine.can_harvest_list_scroll(fake_cards_8, b8) is False
+
+    # 5. Normal full page, scrollbar at top -> True
+    farm_engine.get_scrollbar_info = MagicMock(return_value=(0.3, 0.4, False))
+    assert farm_engine.can_harvest_list_scroll(fake_cards_8, b8) is True
+
+
+def test_harvest_round_safe_center_preference(farm_engine):
+    b8 = cv2.imread(r"D:\ToolPT\tests\fixtures\farm\B8.jpg")
+    
+    # Card 1 at Row 1 (btn_y = 220), Card 2 at Row 3 (btn_y = 520, Center), Card 3 at Row 5 (btn_y = 780, Bottom)
+    # Both are eligible (< 2.0kg)
+    c_top = type("FakeCard", (), {"card_index": 1, "btn_x": 400, "btn_y": 220, "btn_w": 140, "btn_h": 85, "weight": 1.2, "is_clipped": False, "get_click_point": lambda *args, **kwargs: (450, 240)})()
+    c_center = type("FakeCard", (), {"card_index": 2, "btn_x": 400, "btn_y": 520, "btn_w": 140, "btn_h": 85, "weight": 1.1, "is_clipped": False, "get_click_point": lambda *args, **kwargs: (450, 540)})()
+    c_bottom = type("FakeCard", (), {"card_index": 3, "btn_x": 400, "btn_y": 780, "btn_w": 140, "btn_h": 85, "weight": 1.0, "is_clipped": False, "get_click_point": lambda *args, **kwargs: (450, 800)})()
+
+    farm_engine.digit_reader.scan_cards = MagicMock(return_value=[c_top, c_center, c_bottom])
+    farm_engine._fixed_harvest_point = None
+
+    harvested, should_scroll = farm_engine.execute_harvest_round(b8, max_kg=2.0)
+    assert harvested is True
+    assert should_scroll is False
+    # Must lock onto center card at (450, 540)
+    assert farm_engine._fixed_harvest_point == (450, 540)
+
+
+def test_harvest_round_nudges_bottom_only_eligible_cards(farm_engine):
+    b8 = cv2.imread(r"D:\ToolPT\tests\fixtures\farm\B8.jpg")
+    
+    # Only Row 4-5 card is eligible (< 2.0kg), cards in Rows 1-3 are heavy (>= 2.0kg)
+    c_heavy_1 = type("FakeCard", (), {"card_index": 1, "btn_x": 400, "btn_y": 220, "btn_w": 140, "btn_h": 85, "weight": 3.5, "is_clipped": False, "get_click_point": lambda *args, **kwargs: (450, 240)})()
+    c_heavy_2 = type("FakeCard", (), {"card_index": 2, "btn_x": 400, "btn_y": 380, "btn_w": 140, "btn_h": 85, "weight": 3.2, "is_clipped": False, "get_click_point": lambda *args, **kwargs: (450, 400)})()
+    c_bottom = type("FakeCard", (), {"card_index": 3, "btn_x": 400, "btn_y": 720, "btn_w": 140, "btn_h": 85, "weight": 1.5, "is_clipped": False, "get_click_point": lambda *args, **kwargs: (450, 740)})()
+
+    # After nudge, simulated shifted card is in row 3 (btn_y = 500)
+    c_shifted = type("FakeCard", (), {"card_index": 3, "btn_x": 400, "btn_y": 500, "btn_w": 140, "btn_h": 85, "weight": 1.5, "is_clipped": False, "get_click_point": lambda *args, **kwargs: (450, 520)})()
+
+    farm_engine.digit_reader.scan_cards = MagicMock(side_effect=[[c_heavy_1, c_heavy_2, c_bottom], [c_heavy_1, c_heavy_2, c_shifted]])
+    farm_engine.can_harvest_list_scroll = MagicMock(return_value=True)
+    farm_engine.scroll_harvest_list_down = MagicMock(return_value=True)
+    farm_engine._fixed_harvest_point = None
+
+    harvested, should_scroll = farm_engine.execute_harvest_round(b8, max_kg=2.0)
+    # Nudges up gently to center, then locks onto shifted center crop and harvests it!
+    assert farm_engine.scroll_harvest_list_down.called
+    assert harvested is True
+    assert should_scroll is False
+    assert farm_engine._fixed_harvest_point == (450, 520)
+
+
+def test_harvest_round_exits_immediately_when_no_scroll_possible(farm_engine):
+    b8 = cv2.imread(r"D:\ToolPT\tests\fixtures\farm\B8.jpg")
+    
+    # 5 cards, all >= 0.5kg (like user's Mango screenshot)
+    fake_cards_5 = [
+        type("FakeCard", (), {"card_index": i, "btn_x": 400, "btn_y": 220 + i * 130, "btn_w": 140, "btn_h": 85, "weight": 0.55 + i * 0.02, "is_clipped": False, "get_click_point": lambda *args, **kwargs: (450, 240)})()
+        for i in range(5)
+    ]
+    farm_engine.digit_reader.scan_cards = MagicMock(return_value=fake_cards_5)
+    farm_engine._fixed_harvest_point = None
+
+    harvested, should_scroll = farm_engine.execute_harvest_round(b8, max_kg=0.50)
+    assert harvested is False
+    # can_harvest_list_scroll returns False -> should_scroll must be False! Zero drag!
+    assert should_scroll is False
+
+
+def test_run_loop_multi_fruit_sequential_transition(farm_engine):
+    # Setup 2 Category A fruits: Hạt dẻ and Sầu riêng
+    farm_engine.cfg_mgr.rules = {
+        "Hạt dẻ": FruitRule(name="Hạt dẻ", max_kg=3.0, enabled=True),
+        "Sầu riêng": FruitRule(name="Sầu riêng", max_kg=2.5, enabled=True)
+    }
+    farm_engine.cfg_mgr.auto_sell = True
+
+    harvest_calls = []
+    def mock_harvest_single(fruit_name, max_kg):
+        harvest_calls.append(fruit_name)
+        farm_engine.stats["harvested_count"] += 5
+
+    farm_engine._harvest_single_fruit = mock_harvest_single
+    farm_engine.step_sell_cycle = MagicMock(return_value=True)
+    farm_engine.close_harvest_window = MagicMock(return_value=True)
+    farm_engine.capturer.capture.return_value = (np.zeros((1080, 1920, 3), dtype=np.uint8), (0, 0))
+    farm_engine.count_sellable_crops_in_shop = MagicMock(return_value=0)
+
+    farm_engine._run_loop()
+
+    # Verified sequential transition: Hạt dẻ then Sầu riêng
+    assert harvest_calls == ["Hạt dẻ", "Sầu riêng"]
+    # Step sell cycle called after each fruit that had harvested items
+    assert farm_engine.step_sell_cycle.call_count >= 2
+
+
+def test_find_close_button_returns_none_when_modal_not_open(farm_engine):
+    # Blank frame without [X] button
+    clean_frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    assert farm_engine.find_close_button(clean_frame, allow_fallback=False) is None
+    # With allow_fallback=True (only when actively closing modals)
+    assert farm_engine.find_close_button(clean_frame, allow_fallback=True) == (1595, 146, 67, 60)
+
+
+def test_is_harvest_window_open_state_isolation(farm_engine):
+    b8 = cv2.imread(r"D:\ToolPT\tests\fixtures\farm\B8.jpg")
+    empty_screen = cv2.imread(r"D:\ToolPT\tests\fixtures\farm\man_hinh_het_trai.png")
+    empty_1080 = cv2.resize(empty_screen, (1920, 1080))
+    
+    # 1. Real harvest modal screens -> True
+    assert farm_engine.is_harvest_window_open(b8) is True
+    assert farm_engine.is_harvest_window_open(empty_1080) is True
+
+    # 2. Main screen HUD (only B1/B2, NO modal [X] or cards) -> Strictly False!
+    b1_tpl = cv2.imread(r"D:\ToolPT\assets\farm\thu_hoach\B1.png")
+    b2_tpl = cv2.imread(r"D:\ToolPT\assets\farm\thu_hoach\B2.png")
+    hud_frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    hud_frame[180:180+b1_tpl.shape[0], 1635:1635+b1_tpl.shape[1]] = b1_tpl
+    hud_frame[180:180+b2_tpl.shape[0], 1540:1540+b2_tpl.shape[1]] = b2_tpl
+
+    assert farm_engine.is_harvest_window_open(hud_frame) is False
+    # And HUD buttons must be detected correctly
+    assert farm_engine.find_hud_harvest_button(hud_frame) is not None
+    assert farm_engine.find_hud_sell_button(hud_frame) is not None
+
+
+def test_click_hud_harvest_button_clicks_strictly_inside_green_circle(farm_engine):
+    clicks = []
+    farm_engine.input_sim.click.side_effect = lambda x, y, **kw: clicks.append((x, y))
+
+    hit_b2 = (1540, 180, 90, 115)
+    for _ in range(50):
+        farm_engine.click_hud_harvest_button(hit_b2)
+
+    assert len(clicks) == 50
+    for cx, cy in clicks:
+        assert 1570 <= cx <= 1605, f'cx={cx} must stay inside green circle horizontally!'
+        assert 200 <= cy <= 235, f'cy={cy} must stay inside green circle vertically, strictly avoiding text!'
+
+
+def test_click_hud_sell_button_clicks_strictly_inside_red_circle(farm_engine):
+    clicks = []
+    farm_engine.input_sim.click.side_effect = lambda x, y, **kw: clicks.append((x, y))
+
+    hit_b1 = (1635, 180, 90, 115)
+    for _ in range(50):
+        farm_engine.click_hud_sell_button(hit_b1)
+
+    assert len(clicks) == 50
+    for cx, cy in clicks:
+        assert 1665 <= cx <= 1700, f'cx={cx} must stay inside red circle horizontally!'
+        assert 205 <= cy <= 240, f'cy={cy} must stay inside red circle vertically, strictly avoiding text!'
+
+
+def test_click_rect_safeguards_hud_aspect_ratio(farm_engine):
+    clicks = []
+    farm_engine.input_sim.click.side_effect = lambda x, y, **kw: clicks.append((x, y))
+
+    hit_hud = (1540, 180, 90, 115)
+    for _ in range(50):
+        farm_engine.click_rect(hit_hud)
+
+    assert len(clicks) == 50
+    for cx, cy in clicks:
+        assert cy <= 180 + 65, f'cy={cy} must NEVER reach label text (>= 250) even via generic click_rect!'
+
+
+def test_find_tab_nong_san_matches_on_real_game_frame(farm_engine):
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    fixture_path = os.path.join(base_dir, 'tests', 'fixtures', 'farm', 'khung hinh anh ban.jpg')
+    real_frame = cv2.imread(fixture_path)
+    assert real_frame is not None, f'Fixture file not found: {fixture_path}'
+    hit = farm_engine.find_tab_nong_san(real_frame)
+    assert hit is not None, 'find_tab_nong_san must locate the Nông sản tab on real game frame!'
+    x, y, w, h = hit
+    assert w > 0 and h > 0
+
+
+def test_step_setup_filter_strictly_checks_chk_dot_bien_first(farm_engine):
+    """
+    Verifies that 'Ngoại trừ trái đột biến' (B4) is processed BEFORE Tab Nông sản (B5)
+    when both are visible on the modal screen, ensuring B4 is never skipped.
+    """
+    b4 = cv2.imread(r"D:\ToolPT\assets\farm\thu_hoach\B4.jpg")
+    b5 = cv2.imread(r"D:\ToolPT\assets\farm\thu_hoach\B5.jpg")
+    b6 = cv2.imread(r"D:\ToolPT\assets\farm\thu_hoach\item_hat_de.png")
+    b7 = cv2.imread(r"D:\ToolPT\assets\farm\thu_hoach\B7.jpg")
+
+    # Frame containing modal with B4, B5, B6, B7
+    frame_modal = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    frame_modal[100:100+b4.shape[0], 100:100+b4.shape[1]] = b4
+    frame_modal[250:250+b5.shape[0], 250:250+b5.shape[1]] = b5
+    frame_modal[400:400+b6.shape[0], 400:400+b6.shape[1]] = b6
+    frame_modal[800:800+b7.shape[0], 800:800+b7.shape[1]] = b7
+
+    farm_engine.capturer.capture.return_value = (frame_modal, (0, 0))
+
+    clicks = []
+    farm_engine.input_sim.click.side_effect = lambda x, y, **kw: clicks.append((x, y))
+
+    res = farm_engine.step_setup_filter(frame_modal, "Hạt dẻ")
+    assert res is True
+    # clicks[0] must be inside B4 (Ngoại trừ trái đột biến)
+    assert len(clicks) >= 3
+    b4_click_x, b4_click_y = clicks[0]
+    assert 100 <= b4_click_x <= 100 + 50, f"First click must be on B4 checkbox! Got x={b4_click_x}"
+    assert 100 <= b4_click_y <= 100 + b4.shape[0], f"First click must be on B4 checkbox! Got y={b4_click_y}"
+
+    # clicks[1] must be inside B5 (Tab Nông sản)
+    b5_click_x, b5_click_y = clicks[1]
+    assert 250 <= b5_click_x <= 250 + b5.shape[1], f"Second click must be on B5 tab! Got x={b5_click_x}"
+    assert 250 <= b5_click_y <= 250 + b5.shape[0], f"Second click must be on B5 tab! Got y={b5_click_y}"
+

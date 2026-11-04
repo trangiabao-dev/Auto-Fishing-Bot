@@ -169,6 +169,8 @@ class FarmEngine:
         roi: Optional[Tuple[int, int, int, int]] = None,
     ) -> Optional[Tuple[int, int, int, int]]:
         """Finds a template in the frame, returning (x, y, w, h) if found."""
+        if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
+            return None
         tpl = self._templates.get(tpl_key)
         if tpl is None:
             return None
@@ -194,10 +196,44 @@ class FarmEngine:
     def click_rect(self, rect: Tuple[int, int, int, int], margin_ratio: float = 0.2) -> None:
         """Clicks randomly inside a rectangular target."""
         rx, ry, rw, rh = rect
+        # Safeguard: if rect matches HUD button aspect ratio (~90x115), limit vertical click to upper circular half
+        if abs(rw / max(1, rh) - (90 / 115)) < 0.15 and rh >= 80:
+            mx = int(rw * 0.25)
+            cx = random.randint(rx + mx, rx + rw - mx)
+            cy = random.randint(ry + int(rh * 0.18), ry + int(rh * 0.52))
+            self.input_sim.click(cx, cy)
+            return
+
         mx = int(rw * margin_ratio)
         my = int(rh * margin_ratio)
         cx = random.randint(rx + mx, rx + rw - mx)
         cy = random.randint(ry + my, ry + rh - my)
+        self.input_sim.click(cx, cy)
+
+    def click_hud_harvest_button(self, hit: Tuple[int, int, int, int]) -> None:
+        """
+        Clicks strictly inside the circular green area of the HUD 'Thu hoạch' button (B2).
+        Avoids the label text 'Thu hoạch' below (y > 75px) and outer edges.
+        Circle center: (rx + 46, ry + 38) at standard 90x115 scale. Safe jitter: +-12px.
+        """
+        rx, ry, rw, rh = hit
+        scale_x = rw / 90.0
+        scale_y = rh / 115.0
+        cx = rx + int(46 * scale_x) + random.randint(-12, 12)
+        cy = ry + int(38 * scale_y) + random.randint(-12, 12)
+        self.input_sim.click(cx, cy)
+
+    def click_hud_sell_button(self, hit: Tuple[int, int, int, int]) -> None:
+        """
+        Clicks strictly inside the circular red/pink area of the HUD 'Bán' button (B1).
+        Avoids the label text 'Bán' below (y > 75px) and outer edges.
+        Circle center: (rx + 48, ry + 42) at standard 90x115 scale. Safe jitter: +-12px.
+        """
+        rx, ry, rw, rh = hit
+        scale_x = rw / 90.0
+        scale_y = rh / 115.0
+        cx = rx + int(48 * scale_x) + random.randint(-12, 12)
+        cy = ry + int(42 * scale_y) + random.randint(-12, 12)
         self.input_sim.click(cx, cy)
 
     # =========================================================================
@@ -211,23 +247,21 @@ class FarmEngine:
         Step 2: Once at Oliver, click Nút Thu hoạch (B2.png) to open harvest window.
         """
         # Case A: Filter modal already open
-        if (self.find_template(frame, "btn_cai_dat_loc", threshold=0.75) or
-            self.find_template(frame, "tab_nong_san", threshold=0.75) or
-            self.find_template(frame, "chk_dot_bien", threshold=0.75)):
+        if (self.find_template(frame, "btn_cai_dat_loc", threshold=0.72) or
+            self.find_tab_nong_san(frame) or
+            self.find_template(frame, "chk_dot_bien", threshold=0.72)):
             self._log("🔍 [TỰ ĐỘNG NHẬN DIỆN] Bảng Cài Đặt Bộ Lọc đã mở sẵn trên màn hình!")
             return True
 
         # Case B: Harvest cards window already open
-        if (self.find_template(frame, "btn_loc", threshold=0.70) or
-            self.find_template(frame, "btn_thu_hoach", threshold=0.70) or
-            self.is_filter_empty(frame)):
+        if self.is_harvest_window_open(frame):
             self._log("🌾 [TỰ ĐỘNG NHẬN DIỆN] Bảng Thu Hoạch đã mở sẵn trên màn hình!")
             return True
 
         # Step 1: Teleport to Oliver if not yet done this run
         if not getattr(self, "_teleported_to_oliver", False):
             # Nếu đã thấy icon giỏ hàng của Oliver (Hình 1), nhân vật đã đứng trước Oliver -> bỏ qua nút Bán, sang thẳng Thu hoạch
-            if self.find_template(frame, "oliver_basket", threshold=0.65) is not None:
+            if self.find_template(frame, "oliver_basket", threshold=0.75) is not None:
                 self._log("ℹ️ [ĐÃ Ở TRƯỚC CỬA HÀNG] Đã đứng trước ông Oliver (thấy icon giỏ hàng)! Bỏ qua nút 'Bán', chuyển thẳng tới nút 'Thu hoạch'...")
                 self._teleported_to_oliver = True
             else:
@@ -235,7 +269,7 @@ class FarmEngine:
                 if hit_b1:
                     self._set_state(FarmState.TELEPORTING)
                     self._log("🚀 [BƯỚC 1] Bấm nút 'Bán' để dịch chuyển nhân vật tới trước mặt ông bán quả (Oliver)...")
-                    self.click_rect(hit_b1)
+                    self.click_hud_sell_button(hit_b1)
                     self._teleported_to_oliver = True
                     time.sleep(2.0)
                     # If clicking Bán opened a shop modal, close it
@@ -247,62 +281,107 @@ class FarmEngine:
                     f_check, _ = self.capturer.capture(None)
                     frame = f_check
 
-        # Step 2: Click 'Thu hoạch' (B2.png) to open harvest cards
-        hit_b2 = self.find_hud_harvest_button(frame)
-        if hit_b2:
-            self._set_state(FarmState.OPENING_HARVEST)
-            self._log("🌾 [BƯỚC 2] Đã đứng trước ông bán quả! Bấm nút 'Thu hoạch' mở bảng nông sản...")
-            self.click_rect(hit_b2)
-            time.sleep(1.0)
-            f_check, _ = self.capturer.capture(None)
-            if (self.find_template(f_check, "btn_loc", threshold=0.68) or
-                self.find_template(f_check, "btn_thu_hoach", threshold=0.68) or
-                self.is_filter_empty(f_check)):
-                self._log("🌾 [B8] Đã mở thành công Bảng Thu Hoạch!")
-            return True
+        # Step 2: Click 'Thu hoạch' (B2.png) to open harvest cards (CHỈ bấm khi đã ở Oliver)
+        if getattr(self, "_teleported_to_oliver", False):
+            hit_b2 = self.find_hud_harvest_button(frame)
+            if hit_b2:
+                self._set_state(FarmState.OPENING_HARVEST)
+                self._log("🌾 [BƯỚC 2] Đã đứng trước ông bán quả! Bấm nút 'Thu hoạch' mở bảng nông sản...")
+                self.click_hud_harvest_button(hit_b2)
+                time.sleep(1.0)
+                f_check, _ = self.capturer.capture(None)
+                if (self.find_template(f_check, "btn_loc", threshold=0.68) or
+                    self.find_template(f_check, "btn_thu_hoach", threshold=0.68) or
+                    self.is_filter_empty(f_check)):
+                    self._log("🌾 [B8] Đã mở thành công Bảng Thu Hoạch!")
+                return True
 
         return False
 
     def step_setup_filter(self, frame: np.ndarray, fruit_name: str) -> bool:
-        """Applies filter for a single fruit (Category A) with idempotent check."""
-        in_modal = (self.find_template(frame, "btn_cai_dat_loc", threshold=0.75) is not None or
-                    self.find_template(frame, "tab_nong_san", threshold=0.75) is not None)
+        """Applies filter for a single fruit (Category A) with deselection of other configured fruits."""
+        in_modal = (self.find_template(frame, "btn_cai_dat_loc", threshold=0.65) is not None or
+                    self.find_tab_nong_san(frame) is not None or
+                    self.find_template(frame, "chk_dot_bien", threshold=0.65) is not None)
         if not in_modal:
-            loc_btn = self.find_template(frame, "btn_loc", threshold=0.75)
+            loc_btn = self.find_filter_button(frame)
             if not loc_btn:
                 return False
-            self._log(f"🔍 [BỘ LỌC] Bấm 'Lọc' để cấu hình quả: '{fruit_name}'...")
+            self._log(f"🔍 [BỘ LỌC] Bấm 'Lọc' để cấu hình riêng quả: '{fruit_name}'...")
             self.click_rect(loc_btn)
             time.sleep(0.6)
-            f2, _ = self.capturer.capture(None)
+            f_cur, _ = self.capturer.capture(None)
         else:
-            f2 = frame
+            f_cur = frame
 
-        chk = self.find_template(f2, "chk_dot_bien", threshold=0.75)
+        # BƯỚC B4: Xử lý checkbox "Ngoại trừ trái đột biến" TRƯỚC TIÊN (khi modal vừa mở)
+        chk = self.find_template(f_cur, "chk_dot_bien", threshold=0.65)
         if chk:
             fx, fy, fw, fh = chk
-            roi_chk = f2[fy:fy+fh, fx:fx+65]
+            roi_chk = f_cur[fy:fy+fh, fx:fx+65]
             if self.has_blue_checkbox(roi_chk):
-                self._log("🛡️ [BỘ LỌC] 'Ngoại trừ trái đột biến' đã được tích sẵn [✓]! Giữ nguyên, không bấm hủy.")
+                self._log("🛡️ [BỘ LỌC B4] 'Ngoại trừ trái đột biến' đã được tích sẵn [✓]! Giữ nguyên, không bấm hủy.")
             else:
-                self._log("🛡️ [BỘ LỌC] Đã chọn 'Ngoại trừ trái đột biến' để bảo vệ quả đặc biệt!")
+                self._log("🛡️ [BỘ LỌC B4] Đã chọn 'Ngoại trừ trái đột biến' để bảo vệ quả đặc biệt!")
                 self.click_rect((fx, fy, 50, fh))
                 time.sleep(0.4)
+            f_cur, _ = self.capturer.capture(None)
 
-        f3, _ = self.capturer.capture(None)
-        tab_ns = self.find_template(f3, "tab_nong_san", threshold=0.75)
+        # BƯỚC B5: Mở mục "Nông sản" để hiển thị danh sách cây trái
+        tab_ns = self.find_tab_nong_san(f_cur)
         if tab_ns:
+            self._log("🌾 [BỘ LỌC B5] Bấm chọn mục 'Nông sản' để hiển thị danh sách cây trái...")
             self.click_rect(tab_ns)
             time.sleep(0.5)
+            f_cur, _ = self.capturer.capture(None)
 
-        f4, _ = self.capturer.capture(None)
+        # Defensive retry: Nếu chk_dot_bien chưa thấy ở frame 1 mà xuất hiện sau khi mở tab
+        if not chk:
+            chk_retry = self.find_template(f_cur, "chk_dot_bien", threshold=0.65)
+            if chk_retry:
+                fx, fy, fw, fh = chk_retry
+                roi_chk = f_cur[fy:fy+fh, fx:fx+65]
+                if self.has_blue_checkbox(roi_chk):
+                    self._log("🛡️ [BỘ LỌC B4] 'Ngoại trừ trái đột biến' đã được tích sẵn [✓]! Giữ nguyên, không bấm hủy.")
+                else:
+                    self._log("🛡️ [BỘ LỌC B4] Đã chọn 'Ngoại trừ trái đột biến' để bảo vệ quả đặc biệt!")
+                    self.click_rect((fx, fy, 50, fh))
+                    time.sleep(0.4)
+                f_cur, _ = self.capturer.capture(None)
+
+        # DESELECTION: Uncheck any other fruits that might be checked from previous rounds
+        if isinstance(self.cfg_mgr.rules, dict):
+            configured_fruits = list(self.cfg_mgr.rules.keys())
+        elif isinstance(self.cfg_mgr.rules, list):
+            configured_fruits = [r.name for r in self.cfg_mgr.rules]
+        else:
+            configured_fruits = []
+
+        for other_name in configured_fruits:
+            if other_name == fruit_name:
+                continue
+            other_key = self._get_fruit_template_key(other_name)
+            if other_key:
+                other_item = self.find_template(f_cur, other_key, threshold=0.65)
+                if other_item:
+                    ofx, ofy, ofw, ofh = other_item
+                    card_w = max(ofw + 90, 230)
+                    roi_other_chk = f_cur[ofy:ofy+ofh, ofx+190:ofx+card_w]
+                    if self.has_blue_checkbox(roi_other_chk):
+                        self._log(f"🌾 [BỘ LỌC] Hủy tích quả cũ '{other_name}' để chỉ giữ '{fruit_name}'...")
+                        ocx = random.randint(ofx + 10, ofx + card_w - 15)
+                        ocy = random.randint(ofy + 8, ofy + ofh - 8)
+                        self.input_sim.click(ocx, ocy)
+                        time.sleep(0.3)
+                        f_cur, _ = self.capturer.capture(None)
+
         fruit_key = self._get_fruit_template_key(fruit_name)
         if fruit_key:
-            fruit_item = self.find_template(f4, fruit_key, threshold=0.68)
+            fruit_item = self.find_template(f_cur, fruit_key, threshold=0.65)
             if fruit_item:
                 fx, fy, fw, fh = fruit_item
                 card_w = max(fw + 90, 230)
-                roi_card_chk = f4[fy:fy+fh, fx+190:fx+card_w]
+                roi_card_chk = f_cur[fy:fy+fh, fx+190:fx+card_w]
                 if self.has_blue_checkbox(roi_card_chk):
                     self._log(f"🌾 [BỘ LỌC] Quả '{fruit_name}' đã được tích sẵn [✓]! Giữ nguyên, không bấm hủy.")
                 else:
@@ -316,8 +395,19 @@ class FarmEngine:
         else:
             self._log(f"⚠️ [BỘ LỌC B6] Chưa có template icon cho quả '{fruit_name}'!")
 
-        f5, _ = self.capturer.capture(None)
-        btn_apply = self.find_template(f5, "btn_cai_dat_loc", threshold=0.75)
+        # Final check: make sure chk_dot_bien is selected if it was only revealed after tab click
+        f_final, _ = self.capturer.capture(None)
+        chk_after = self.find_template(f_final, "chk_dot_bien", threshold=0.65)
+        if chk_after:
+            fx, fy, fw, fh = chk_after
+            roi_chk = f_final[fy:fy+fh, fx:fx+65]
+            if not self.has_blue_checkbox(roi_chk):
+                self._log("🛡️ [BỘ LỌC] Đã chọn 'Ngoại trừ trái đột biến' để bảo vệ quả đặc biệt!")
+                self.click_rect((fx, fy, 50, fh))
+                time.sleep(0.4)
+                f_final, _ = self.capturer.capture(None)
+
+        btn_apply = self.find_template(f_final, "btn_cai_dat_loc", threshold=0.65)
         if btn_apply:
             self._log("✅ [BỘ LỌC] Áp dụng bộ lọc thành công!")
             self.click_rect(btn_apply)
@@ -327,45 +417,63 @@ class FarmEngine:
 
     def step_setup_multi_filter(self, frame: np.ndarray, fruit_names: List[str]) -> bool:
         """Applies filter for multiple Category B fruits at once with idempotent check."""
-        in_modal = (self.find_template(frame, "btn_cai_dat_loc", threshold=0.75) is not None or
-                    self.find_template(frame, "tab_nong_san", threshold=0.75) is not None)
+        in_modal = (self.find_template(frame, "btn_cai_dat_loc", threshold=0.65) is not None or
+                    self.find_tab_nong_san(frame) is not None or
+                    self.find_template(frame, "chk_dot_bien", threshold=0.65) is not None)
         if not in_modal:
-            loc_btn = self.find_template(frame, "btn_loc", threshold=0.75)
+            loc_btn = self.find_filter_button(frame)
             if not loc_btn:
                 return False
             self._log(f"🔍 [BỘ LỌC ĐA QUẢ] Bấm 'Lọc' cấu hình {len(fruit_names)} loại quả thu tự do...")
             self.click_rect(loc_btn)
             time.sleep(0.6)
-            f2, _ = self.capturer.capture(None)
+            f_cur, _ = self.capturer.capture(None)
         else:
-            f2 = frame
+            f_cur = frame
 
-        chk = self.find_template(f2, "chk_dot_bien", threshold=0.75)
+        # BƯỚC B4: Xử lý checkbox "Ngoại trừ trái đột biến" TRƯỚC TIÊN (khi modal vừa mở)
+        chk = self.find_template(f_cur, "chk_dot_bien", threshold=0.65)
         if chk:
             fx, fy, fw, fh = chk
-            roi_chk = f2[fy:fy+fh, fx:fx+65]
+            roi_chk = f_cur[fy:fy+fh, fx:fx+65]
             if self.has_blue_checkbox(roi_chk):
-                self._log("🛡️ [BỘ LỌC] 'Ngoại trừ trái đột biến' đã được tích sẵn [✓]! Giữ nguyên, không bấm hủy.")
+                self._log("🛡️ [BỘ LỌC B4] 'Ngoại trừ trái đột biến' đã được tích sẵn [✓]! Giữ nguyên, không bấm hủy.")
             else:
-                self._log("🛡️ [BỘ LỌC] Chọn 'Ngoại trừ trái đột biến'...")
+                self._log("🛡️ [BỘ LỌC B4] Đã chọn 'Ngoại trừ trái đột biến' để bảo vệ quả đặc biệt!")
                 self.click_rect((fx, fy, 50, fh))
                 time.sleep(0.4)
+            f_cur, _ = self.capturer.capture(None)
 
-        f3, _ = self.capturer.capture(None)
-        tab_ns = self.find_template(f3, "tab_nong_san", threshold=0.75)
+        # BƯỚC B5: Mở mục "Nông sản" để hiển thị danh sách cây trái
+        tab_ns = self.find_tab_nong_san(f_cur)
         if tab_ns:
+            self._log("🌾 [BỘ LỌC B5] Bấm chọn mục 'Nông sản' để hiển thị danh sách cây trái...")
             self.click_rect(tab_ns)
             time.sleep(0.5)
+            f_cur, _ = self.capturer.capture(None)
 
-        f4, _ = self.capturer.capture(None)
+        # Defensive retry: Nếu chk_dot_bien chưa thấy ở frame 1 mà xuất hiện sau khi mở tab
+        if not chk:
+            chk_retry = self.find_template(f_cur, "chk_dot_bien", threshold=0.65)
+            if chk_retry:
+                fx, fy, fw, fh = chk_retry
+                roi_chk = f_cur[fy:fy+fh, fx:fx+65]
+                if self.has_blue_checkbox(roi_chk):
+                    self._log("🛡️ [BỘ LỌC B4] 'Ngoại trừ trái đột biến' đã được tích sẵn [✓]! Giữ nguyên, không bấm hủy.")
+                else:
+                    self._log("🛡️ [BỘ LỌC B4] Đã chọn 'Ngoại trừ trái đột biến' để bảo vệ quả đặc biệt!")
+                    self.click_rect((fx, fy, 50, fh))
+                    time.sleep(0.4)
+                f_cur, _ = self.capturer.capture(None)
+
         for name in fruit_names:
             fruit_key = self._get_fruit_template_key(name)
             if fruit_key:
-                fruit_item = self.find_template(f4, fruit_key, threshold=0.68)
+                fruit_item = self.find_template(f_cur, fruit_key, threshold=0.65)
                 if fruit_item:
                     fx, fy, fw, fh = fruit_item
                     card_w = max(fw + 90, 230)
-                    roi_card_chk = f4[fy:fy+fh, fx+190:fx+card_w]
+                    roi_card_chk = f_cur[fy:fy+fh, fx+190:fx+card_w]
                     if self.has_blue_checkbox(roi_card_chk):
                         self._log(f"🌾 [BỘ LỌC] Quả '{name}' đã được tích sẵn [✓]! Giữ nguyên.")
                     else:
@@ -374,13 +482,14 @@ class FarmEngine:
                         cy = random.randint(fy + 8, fy + fh - 8)
                         self.input_sim.click(cx, cy)
                         time.sleep(0.3)
+                        f_cur, _ = self.capturer.capture(None)
                 else:
                     self._log(f"⚠️ [BỘ LỌC B6] Chưa thấy icon/tên '{name}' trên trang lọc!")
             else:
                 self._log(f"⚠️ [BỘ LỌC B6] Chưa có template icon cho quả '{name}'!")
 
-        f5, _ = self.capturer.capture(None)
-        btn_apply = self.find_template(f5, "btn_cai_dat_loc", threshold=0.75)
+        f_apply, _ = self.capturer.capture(None)
+        btn_apply = self.find_template(f_apply, "btn_cai_dat_loc", threshold=0.65)
         if btn_apply:
             self._log("✅ [BỘ LỌC] Áp dụng bộ lọc đa quả thành công!")
             self.click_rect(btn_apply)
@@ -495,55 +604,196 @@ class FarmEngine:
     def find_hud_sell_button(self, frame: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
         """
         Detects the circular red/pink 'Bán' button in the top-right HUD.
-        Centered tightly on the circular apple button at (1680, 218) with 70x70 bounding box.
-        Immune to day/night lighting cycles, camera rotation, and resolution scaling.
+        Uses template matching with 'harvest_b1' (threshold 0.65) first.
+        Falls back to HSV color segmentation for the red apple circle at (1635, 180, 90, 115).
         """
+        hit = self.find_template(frame, "harvest_b1", threshold=0.65)
+        if hit:
+            return hit
+
         fh, fw = frame.shape[:2]
-        rx = int(fw * (1645 / 1920))
-        ry = int(fh * (183 / 1080))
-        rw = int(fw * (70 / 1920))
-        rh = int(fh * (70 / 1080))
+        rx = int(fw * (1635 / 1920))
+        ry = int(fh * (180 / 1080))
+        rw = int(fw * (90 / 1920))
+        rh = int(fh * (115 / 1080))
         if ry + rh <= fh and rx + rw <= fw and rw * rh > 0:
             roi = frame[ry:ry+rh, rx:rx+rw]
             hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
             mask1 = cv2.inRange(hsv, np.array([0, 60, 60]), np.array([15, 255, 255]))
             mask2 = cv2.inRange(hsv, np.array([160, 60, 60]), np.array([180, 255, 255]))
             ratio = (int(cv2.countNonZero(mask1)) + int(cv2.countNonZero(mask2))) / float(rw * rh)
-            if ratio >= 0.35:
+            if ratio >= 0.25:
                 return (rx, ry, rw, rh)
-        return self.find_template(frame, "harvest_b1", threshold=0.60)
+        return None
 
     def find_hud_harvest_button(self, frame: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
         """
         Detects the circular green 'Thu hoạch' button in the top-right HUD.
-        Centered tightly on the green sprout circle at (1587, 218) with 70x70 bounding box.
-        Immune to day/night lighting cycles, camera rotation, and resolution scaling.
+        Uses template matching with 'harvest_b2' (threshold 0.65) first.
+        Falls back to HSV color segmentation for the green sprout circle at (1540, 180, 90, 115).
         """
+        hit = self.find_template(frame, "harvest_b2", threshold=0.65)
+        if hit:
+            return hit
+
         fh, fw = frame.shape[:2]
-        rx = int(fw * (1552 / 1920))
-        ry = int(fh * (183 / 1080))
-        rw = int(fw * (70 / 1920))
-        rh = int(fh * (70 / 1080))
+        rx = int(fw * (1540 / 1920))
+        ry = int(fh * (180 / 1080))
+        rw = int(fw * (90 / 1920))
+        rh = int(fh * (115 / 1080))
         if ry + rh <= fh and rx + rw <= fw and rw * rh > 0:
             roi = frame[ry:ry+rh, rx:rx+rw]
             hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
             mask_g = cv2.inRange(hsv, np.array([35, 60, 60]), np.array([85, 255, 255]))
             ratio = int(cv2.countNonZero(mask_g)) / float(rw * rh)
-            if ratio >= 0.30:
+            if ratio >= 0.20:
                 return (rx, ry, rw, rh)
-        return self.find_template(frame, "harvest_b2", threshold=0.60)
+        return None
 
-    def find_close_button(self, frame: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
+    def find_filter_button(self, frame: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
         """
-        Finds the close [X] button on top-right of modal dialogs using template matching.
-        Falls back to calibrated modal corner coordinates if template not found.
+        Locates the 'Lọc' button in the harvest window top-right corner.
+        Multi-layer detector:
+          1. Template matching with 'btn_loc' (threshold 0.58).
+          2. Geometric fallback relative to the close [X] button:
+             In 1080p, 'Lọc' button is at (X_close - 188, Y_close + 10, 176, 47).
+             Immune to the orange check badge [✓] overlapping the button!
         """
-        hit = self.find_template(frame, "btn_close_x", threshold=0.70)
+        hit = self.find_template(frame, "btn_loc", threshold=0.58)
         if hit:
             return hit
-        # Calibrated 1080p fallback: modal top-right X is at ~ (1596, 147) -> (0.831, 0.136)
-        fh, fw = frame.shape[:2]
-        return (int(fw * 0.831), int(fh * 0.136), 67, 60)
+
+        close_hit = self.find_close_button(frame)
+        if close_hit:
+            cx, cy, cw, ch = close_hit
+            fh, fw = frame.shape[:2]
+            scale_x = fw / 1920.0
+            scale_y = fh / 1080.0
+            lx = cx - int(188 * scale_x)
+            ly = cy + int(10 * scale_y)
+            lw = int(176 * scale_x)
+            lh = int(47 * scale_y)
+            if 0 <= lx and lx + lw <= fw and 0 <= ly and ly + lh <= fh:
+                return (lx, ly, lw, lh)
+
+        return None
+
+    def find_tab_nong_san(self, frame: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
+        """
+        Locates the 'Nông sản' tab/category on the harvest filter modal.
+        Multi-tier detection:
+          1. Color template matching with 'tab_nong_san' (threshold 0.58).
+          2. Grayscale template matching to eliminate font/background contrast variations.
+        """
+        hit = self.find_template(frame, "tab_nong_san", threshold=0.58)
+        if hit:
+            return hit
+
+        tpl = self._templates.get("tab_nong_san")
+        if tpl is not None and frame.shape[0] >= tpl.shape[0] and frame.shape[1] >= tpl.shape[1]:
+            gray_f = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            gray_tpl = cv2.cvtColor(tpl, cv2.COLOR_BGR2GRAY)
+            res = cv2.matchTemplate(gray_f, gray_tpl, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, max_loc = cv2.minMaxLoc(res)
+            if max_val >= 0.58:
+                tw, th = tpl.shape[1], tpl.shape[0]
+                return (max_loc[0], max_loc[1], tw, th)
+        return None
+
+    def can_harvest_list_scroll(self, cards: List[HarvestCard], frame: np.ndarray) -> bool:
+        """
+        Determines if the harvest card table can physically scroll down further.
+        Prevents unnecessary, redundant mouse dragging when:
+          1. The visible card count is small (< 6 cards out of 10-slot full screen).
+          2. The last visible row is incomplete (odd number of cards: 1, 3, 5, 7, 9).
+          3. The scrollbar thumb has reached the bottom (bottom_ratio >= 0.95 and thumb_ratio < 0.85).
+        """
+        if not cards:
+            return False
+
+        # Less than 6 cards -> Definitely cannot fill a 10-card page (e.g. 5 cards like Mango screenshot)
+        if len(cards) < 6:
+            return False
+
+        # Incomplete last row (odd number of cards) -> End of items
+        if len(cards) % 2 != 0:
+            return False
+
+        # Check scrollbar position if properly detectable
+        thumb_ratio, bottom_ratio, is_at_bottom = self.get_scrollbar_info(frame)
+        if is_at_bottom and bottom_ratio >= 0.95 and thumb_ratio < 0.85:
+            return False
+
+        return True
+
+    def close_harvest_window(self) -> bool:
+        """
+        Closes harvest modal and verifies return to the main screen in front of Oliver
+        (where HUD harvest button / Oliver basket is visible).
+        """
+        self._fixed_harvest_point = None
+        for attempt in range(4):
+            f_cur, _ = self.capturer.capture(None)
+            # Check if HUD is visible and harvest modal is closed
+            is_harvest_open = (
+                self.find_template(f_cur, "btn_loc", threshold=0.58) is not None or
+                self.find_template(f_cur, "btn_thu_hoach", threshold=0.68) is not None or
+                self.is_filter_empty(f_cur)
+            )
+            is_shop_open = (
+                self.find_template(f_cur, "sell_chon_tu_dong", threshold=0.68) is not None or
+                self.find_template(f_cur, "sell_coin_btn", threshold=0.68) is not None
+            )
+            if not is_harvest_open and not is_shop_open:
+                if self.find_hud_harvest_button(f_cur) is not None or self.find_template(f_cur, "oliver_basket", threshold=0.65) is not None:
+                    return True
+
+            close_btn = self.find_close_button(f_cur)
+            if close_btn:
+                self.click_rect(close_btn)
+                time.sleep(0.4)
+                if attempt > 0:
+                    self.input_sim.press_key("esc")
+                time.sleep(0.6)
+            else:
+                self.input_sim.press_key("esc")
+                time.sleep(0.8)
+
+        return True
+
+    def find_close_button(self, frame: np.ndarray, allow_fallback: bool = False) -> Optional[Tuple[int, int, int, int]]:
+        """
+        Finds the close [X] button on top-right of modal dialogs using template matching.
+        Only falls back to calibrated modal corner coordinates if allow_fallback=True.
+        Strictly returns None on the main HUD screen or in 3D world to prevent false modal detection.
+        """
+        hit = self.find_template(frame, "btn_close_x", threshold=0.68)
+        if hit:
+            return hit
+        if allow_fallback:
+            fh, fw = frame.shape[:2]
+            return (int(fw * 0.831), int(fh * 0.136), 67, 60)
+        return None
+
+    def is_harvest_window_open(self, frame: np.ndarray) -> bool:
+        """
+        Determines if the Harvest Cards window is actually open and visible on screen:
+          - Filter empty banner showing ('Không có trái nào phù hợp...').
+          - Cyan 'btn_thu_hoach' buttons on crop cards.
+          - 'Lọc' button (template match >= 0.58).
+          - Or close [X] is matched AND filter button is located.
+        Strictly returns False on the main HUD screen or in 3D world.
+        """
+        if self.is_filter_empty(frame):
+            return True
+        if self.find_template(frame, "btn_thu_hoach", threshold=0.68) is not None:
+            return True
+        if self.find_template(frame, "btn_loc", threshold=0.58) is not None:
+            return True
+        close_hit = self.find_close_button(frame, allow_fallback=False)
+        if close_hit is not None and self.find_filter_button(frame) is not None:
+            return True
+        return False
 
     def find_sell_confirm_button(self, frame: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
         """
@@ -687,10 +937,40 @@ class FarmEngine:
         # If _fixed_harvest_point is None (first time after filter, or after white space / veto)
         eligible = [c for c in cards if 0.0 < c.weight < max_kg and not c.is_clipped]
         if eligible:
-            target = random.choice(eligible)
+            # Safe Center Row Selection (Row 2-3 Preference):
+            # In 1080p, Row 2-3 buttons are at btn_y in [320..600].
+            # Row 1 buttons are at btn_y < 320.
+            # Row 4-5 buttons are at btn_y >= 600 (sát đáy).
+            center_eligible = [c for c in eligible if 320 <= c.btn_y < 600]
+            top_eligible = [c for c in eligible if c.btn_y < 320]
+            bottom_eligible = [c for c in eligible if c.btn_y >= 600]
+
+            if center_eligible:
+                target = random.choice(center_eligible)
+            elif top_eligible:
+                target = random.choice(top_eligible)
+            else:
+                # Only Row 4-5 cards are eligible:
+                # Nudge up gently to Row 3 (center) if list can scroll, preventing giant crops shifting down!
+                if self.can_harvest_list_scroll(cards, frame):
+                    self._log(f"🌾 [DỜI VÀO TRUNG TÂM] Thấy quả hợp lệ ở dòng 4-5 ({bottom_eligible[0].weight:.2f}kg). Đang cuộn nhẹ đưa quả lên dòng 3 (giữa màn hình)...")
+                    self.scroll_harvest_list_down(frame)
+                    time.sleep(0.18)
+                    cap_res = self.capturer.capture(None) if hasattr(self, "capturer") and self.capturer else None
+                    f_new = cap_res[0] if (isinstance(cap_res, tuple) and len(cap_res) > 0 and cap_res[0] is not None) else frame
+                    cards_new = self.digit_reader.scan_cards(f_new)
+                    eligible_new = [c for c in cards_new if 0.0 < c.weight < max_kg and not c.is_clipped]
+                    if eligible_new:
+                        center_new = [c for c in eligible_new if 320 <= c.btn_y < 600]
+                        target = random.choice(center_new) if center_new else random.choice(eligible_new)
+                    else:
+                        target = random.choice(bottom_eligible)
+                else:
+                    target = random.choice(bottom_eligible)
+
             cx, cy = target.get_click_point()
             self._fixed_harvest_point = (cx, cy)
-            self._log(f"🎯 [CỐ ĐỊNH NÚT] Đã random chọn ô #{target.card_index} ({target.weight:.2f}kg) tại ({cx}, {cy}) để thu hoạch liên tục...")
+            self._log(f"🎯 [CỐ ĐỊNH NÚT AN TOÀN] Đã chọn ô #{target.card_index} ({target.weight:.2f}kg, Y={cy}) tại ({cx}, {cy}) để thu hoạch liên tục...")
             self.input_sim.click(cx, cy, hold_min_ms=25, hold_max_ms=45)
             self.stats["harvested_count"] += 1
             time.sleep(max(self.cfg_mgr.shift_delay_s, 0.25))
@@ -698,7 +978,8 @@ class FarmEngine:
         else:
             self._fixed_harvest_point = None
             self.stats["skipped_heavy_count"] += len(cards)
-            return False, True
+            can_scroll = self.can_harvest_list_scroll(cards, frame)
+            return False, can_scroll
 
     def execute_fast_harvest_round(self, frame: np.ndarray) -> Tuple[bool, bool]:
         """
@@ -800,9 +1081,9 @@ class FarmEngine:
 
     def scroll_harvest_list_down(self, frame: np.ndarray) -> bool:
         """
-        Performs a verified scroll-down gesture on the harvest table.
-        Uses native swipe-up drag on the neutral body of the crop card (X: ~550, Y: 680 -> 280)
-        combined with mouse wheel as fallback.
+        Performs a swift, verified scroll-down gesture on the harvest table.
+        Uses a smooth swipe-up drag in the neutral center gutter (X=960)
+        combined with a single notch of mouse wheel for 100% reliable scrolling in Unity PC.
         Captures frame before and after to verify whether list content actually shifted.
 
         Returns:
@@ -813,23 +1094,19 @@ class FarmEngine:
         cards_before = self.digit_reader.scan_cards(frame)
         sig_before = [(round(c.weight, 2), c.kg_y) for c in cards_before]
 
-        # 1. Native swipe-up drag (touch gesture emulation for Unity ScrollRect)
-        x0 = int(fw * (550 / 1920))
+        # Drag on the left card body (X=400, strictly avoiding cyan button at X=730..920)
+        # Smooth swipe from bottom row (Y=680) to top row (Y=420) exactly matching human hand
+        drag_x = int(fw * (400 / 1920))
         y0 = int(fh * (680 / 1080))
-        x1 = int(fw * (550 / 1920))
-        y1 = int(fh * (280 / 1080))
-        self.input_sim.drag(x0, y0, x1, y1, duration_s=0.22, steps=12)
+        y1 = int(fh * (420 / 1080))
+        self.input_sim.drag(drag_x, y0, drag_x, y1, duration_s=0.35, steps=20)
 
-        # 2. Wheel fallback directly over the scroll container
-        self.input_sim.move_to(x0, int(fh * (480 / 1080)), human_curve=False)
-        for _ in range(4):
-            self.input_sim.scroll(-120)
-            time.sleep(0.03)
+        # Allow Unity physics / inertia to settle gently
+        time.sleep(0.25)
 
-        time.sleep(0.4)  # Wait for Unity physics / inertia to settle
-
-        # 3. Capture new frame and compare card signatures
-        new_frame, _ = self.capturer.capture(None)
+        # Capture new frame and compare card signatures
+        cap_res = self.capturer.capture(None) if hasattr(self, "capturer") and self.capturer else None
+        new_frame = cap_res[0] if (isinstance(cap_res, tuple) and len(cap_res) > 0 and cap_res[0] is not None) else frame
         cards_after = self.digit_reader.scan_cards(new_frame)
         sig_after = [(round(c.weight, 2), c.kg_y) for c in cards_after]
 
@@ -953,7 +1230,7 @@ class FarmEngine:
                     hit_b1 = self.find_hud_sell_button(f_shop)
                     if hit_b1:
                         self._log(" -> Bấm nút 'Bán' trên HUD để mở lại cửa hàng Oliver...")
-                        self.click_rect(hit_b1)
+                        self.click_hud_sell_button(hit_b1)
                         time.sleep(1.5)
 
         # Phase 3-6: Multi-batch Sell Loop (sells all full batches of 100)
@@ -1170,67 +1447,23 @@ class FarmEngine:
 
                 # 2. Detect Filter Modal (B4, B5, B7)
                 in_filter_modal = (
-                    self.find_template(frame, "btn_cai_dat_loc", threshold=0.72) is not None or
-                    self.find_template(frame, "tab_nong_san", threshold=0.72) is not None or
-                    self.find_template(frame, "chk_dot_bien", threshold=0.72) is not None
+                    self.find_template(frame, "btn_cai_dat_loc", threshold=0.65) is not None or
+                    self.find_tab_nong_san(frame) is not None or
+                    self.find_template(frame, "chk_dot_bien", threshold=0.65) is not None
                 )
                 if in_filter_modal:
                     self._set_state(FarmState.APPLYING_FILTER)
-                    chk = self.find_template(frame, "chk_dot_bien", threshold=0.72)
-                    if chk:
-                        fx, fy, fw, fh = chk
-                        roi_chk = frame[fy:fy+fh, fx:fx+65]
-                        if self.has_blue_checkbox(roi_chk):
-                            self._log("🛡️ [BỘ LỌC] 'Ngoại trừ trái đột biến' đã được tích sẵn [✓]! Giữ nguyên, không bấm hủy.")
-                        else:
-                            self._log("🛡️ [BỘ LỌC] Đã chọn 'Ngoại trừ trái đột biến' để bảo vệ quả đặc biệt!")
-                            self.click_rect((fx, fy, 50, fh))
-                            time.sleep(0.4)
-
-                    f_tab, _ = self.capturer.capture(None)
-                    tab_ns = self.find_template(f_tab, "tab_nong_san", threshold=0.72)
-                    if tab_ns:
-                        self.click_rect(tab_ns)
-                        time.sleep(0.5)
-
-                    f_fruit, _ = self.capturer.capture(None)
-                    fruit_key = self._get_fruit_template_key(fruit_name)
-                    if fruit_key:
-                        fruit_item = self.find_template(f_fruit, fruit_key, threshold=0.68)
-                        if fruit_item:
-                            fx, fy, fw, fh = fruit_item
-                            card_w = max(fw + 90, 230)
-                            roi_card_chk = f_fruit[fy:fy+fh, fx+190:fx+card_w]
-                            if self.has_blue_checkbox(roi_card_chk):
-                                self._log(f"🌾 [BỘ LỌC] Quả '{fruit_name}' đã được tích sẵn [✓]! Giữ nguyên, không bấm hủy.")
-                            else:
-                                self._log(f"🌾 [BỘ LỌC] Đã tìm thấy '{fruit_name}'! Bấm chọn...")
-                                cx = random.randint(fx + 10, fx + card_w - 15)
-                                cy = random.randint(fy + 8, fy + fh - 8)
-                                self.input_sim.click(cx, cy)
-                                time.sleep(0.4)
-                        else:
-                            self._log(f"⚠️ [BỘ LỌC] Chưa thấy dòng quả '{fruit_name}' trên bảng lọc!")
-
-                    f_apply, _ = self.capturer.capture(None)
-                    btn_apply = self.find_template(f_apply, "btn_cai_dat_loc", threshold=0.72)
-                    if btn_apply:
-                        self._log("✅ [BỘ LỌC] Bấm 'Cài đặt bộ lọc' hoàn tất cấu hình!")
-                        self.click_rect(btn_apply)
+                    if self.step_setup_filter(frame, fruit_name):
                         filter_done = True
-                        time.sleep(0.8)
+                    time.sleep(0.5)
                     continue
 
                 # 3. Detect Harvest Window (B3, Cards, or Empty Banner)
-                in_harvest_window = (
-                    self.find_template(frame, "btn_loc", threshold=0.68) is not None or
-                    self.find_template(frame, "btn_thu_hoach", threshold=0.68) is not None or
-                    self.is_filter_empty(frame)
-                )
+                in_harvest_window = self.is_harvest_window_open(frame)
                 if in_harvest_window:
                     if not filter_done:
                         self._set_state(FarmState.APPLYING_FILTER)
-                        btn_loc = self.find_template(frame, "btn_loc", threshold=0.68)
+                        btn_loc = self.find_filter_button(frame)
                         if btn_loc:
                             self._log(f"🔍 [BẢNG VƯỜN] Đang mở bảng thu hoạch! Bấm nút 'Lọc' để cấu hình quả '{fruit_name}'...")
                             self.click_rect(btn_loc)
@@ -1254,20 +1487,31 @@ class FarmEngine:
                     if harvested:
                         stuck_scrolls = 0
                         total_scrolls = 0
-                    elif should_scroll:
+                    elif self._fixed_harvest_point is not None:
+                        # Transiently waiting for card shift/settle at fixed slot: keep loop alive, do not scroll or exit!
+                        continue
+                    elif not should_scroll:
+                        # ZERO DRAGS GUARD: No eligible crops and list cannot scroll further
+                        self._log(f"🏁 [HẾT QUẢ THU] Tất cả quả hiển thị đều >= {max_kg:.2f}kg và danh sách không thể cuộn thêm. Dừng ngay, 0 lần kéo chuột thừa!")
+                        break
+                    else:
+                        cards = self.digit_reader.scan_cards(frame)
+                        if not self.can_harvest_list_scroll(cards, frame):
+                            self._log(f"🏁 [HẾT QUẢ THU] Bảng không đủ quả để cuộn (chỉ có {len(cards)} thẻ). Kết thúc quả '{fruit_name}'!")
+                            break
+
                         total_scrolls += 1
                         if total_scrolls > 40:
                             self._log(f"🏁 [XONG QUẢ] Đã đạt giới hạn quét tối đa (40 lần cuộn)! Kết thúc quả '{fruit_name}'.")
                             break
 
-                        self._log(f"📜 [CUỘN TRANG] Các quả hiện tại đều >= {max_kg:.2f}kg (Thanh cuộn: {bottom_ratio*100:.0f}%). Đang cuộn xuống tìm quả nhỏ hơn... (Lần {total_scrolls})")
+                        self._log(f"📜 [CUỘN TRANG] Đang cuộn nhẹ xuống tìm quả nhỏ hơn... (Thanh cuộn: {bottom_ratio*100:.0f}%, Lần {total_scrolls})")
                         scrolled = self.scroll_harvest_list_down(frame)
                         self._fixed_harvest_point = None
                         if not scrolled or is_at_bottom:
                             stuck_scrolls += 1
                             if stuck_scrolls >= 2:
                                 # FAIL-SAFE BOTTOM EXIT VERIFICATION:
-                                # Ensure zero remaining harvestable crops are left unharvested before exiting!
                                 time.sleep(0.4)
                                 f_last, _ = self.capturer.capture(None)
                                 last_cards = self.digit_reader.scan_cards(f_last)
@@ -1292,13 +1536,13 @@ class FarmEngine:
 
                 if not getattr(self, "_teleported_to_oliver", False):
                     # Nếu đã thấy icon giỏ hàng của Oliver (Hình 1), nhân vật đã đứng trước Oliver -> bỏ qua nút Bán, sang thẳng Thu hoạch
-                    if self.find_template(frame, "oliver_basket", threshold=0.65) is not None:
+                    if self.find_template(frame, "oliver_basket", threshold=0.75) is not None:
                         self._log("ℹ️ [ĐÃ Ở TRƯỚC CỬA HÀNG] Đã đứng trước ông Oliver (thấy icon giỏ hàng)! Bỏ qua nút 'Bán', chuyển thẳng tới nút 'Thu hoạch'...")
                         self._teleported_to_oliver = True
                     elif hit_b1:
                         self._set_state(FarmState.TELEPORTING)
                         self._log("🚀 [BƯỚC 1] Thấy nút 'Bán' trên HUD! Bấm để dịch chuyển nhân vật tới trước mặt ông bán quả (Oliver)...")
-                        self.click_rect(hit_b1)
+                        self.click_hud_sell_button(hit_b1)
                         self._teleported_to_oliver = True
                         time.sleep(2.0)
                         f_chk, _ = self.capturer.capture(None)
@@ -1307,11 +1551,16 @@ class FarmEngine:
                             self.click_rect(close_btn)
                             time.sleep(0.8)
                         continue
+                    else:
+                        # CHƯA ĐẾN OLIVER và chưa thấy nút Bán -> tiếp tục chờ quét B1, TUYỆT ĐỐI không bấm Thu hoạch
+                        time.sleep(0.3)
+                        continue
 
+                # CHỈ bấm Thu hoạch khi đã xác nhận đứng trước Oliver
                 if hit_b2:
                     self._set_state(FarmState.OPENING_HARVEST)
                     self._log("🌾 [BƯỚC 2] Thấy nút 'Thu hoạch' trên HUD! Bấm mở bảng nông sản...")
-                    self.click_rect(hit_b2)
+                    self.click_hud_harvest_button(hit_b2)
                     time.sleep(1.2)
                     continue
 
@@ -1369,66 +1618,23 @@ class FarmEngine:
 
                 # 2. Filter Modal
                 in_filter_modal = (
-                    self.find_template(frame, "btn_cai_dat_loc", threshold=0.72) is not None or
-                    self.find_template(frame, "tab_nong_san", threshold=0.72) is not None or
-                    self.find_template(frame, "chk_dot_bien", threshold=0.72) is not None
+                    self.find_template(frame, "btn_cai_dat_loc", threshold=0.65) is not None or
+                    self.find_tab_nong_san(frame) is not None or
+                    self.find_template(frame, "chk_dot_bien", threshold=0.65) is not None
                 )
                 if in_filter_modal:
                     self._set_state(FarmState.APPLYING_FILTER)
-                    chk = self.find_template(frame, "chk_dot_bien", threshold=0.72)
-                    if chk:
-                        fx, fy, fw, fh = chk
-                        roi_chk = frame[fy:fy+fh, fx:fx+65]
-                        if self.has_blue_checkbox(roi_chk):
-                            self._log("🛡️ [BỘ LỌC] 'Ngoại trừ trái đột biến' đã được tích sẵn [✓]! Giữ nguyên, không bấm hủy.")
-                        else:
-                            self._log("🛡️ [BỘ LỌC] Chọn 'Ngoại trừ trái đột biến'...")
-                            self.click_rect((fx, fy, 50, fh))
-                            time.sleep(0.4)
-
-                    f_tab, _ = self.capturer.capture(None)
-                    tab_ns = self.find_template(f_tab, "tab_nong_san", threshold=0.72)
-                    if tab_ns:
-                        self.click_rect(tab_ns)
-                        time.sleep(0.5)
-
-                    f_fruits, _ = self.capturer.capture(None)
-                    for name in fruit_names:
-                        f_key = self._get_fruit_template_key(name)
-                        if f_key:
-                            fruit_item = self.find_template(f_fruits, f_key, threshold=0.68)
-                            if fruit_item:
-                                fx, fy, fw, fh = fruit_item
-                                card_w = max(fw + 90, 230)
-                                roi_card_chk = f_fruits[fy:fy+fh, fx+190:fx+card_w]
-                                if self.has_blue_checkbox(roi_card_chk):
-                                    self._log(f"🌾 [BỘ LỌC] Quả '{name}' đã được tích sẵn [✓]! Giữ nguyên.")
-                                else:
-                                    self._log(f" -> Tích chọn quả: '{name}'")
-                                    cx = random.randint(fx + 10, fx + card_w - 15)
-                                    cy = random.randint(fy + 8, fy + fh - 8)
-                                    self.input_sim.click(cx, cy)
-                                    time.sleep(0.3)
-
-                    f_apply, _ = self.capturer.capture(None)
-                    btn_apply = self.find_template(f_apply, "btn_cai_dat_loc", threshold=0.72)
-                    if btn_apply:
-                        self._log("✅ [BỘ LỌC] Bấm 'Cài đặt bộ lọc' hoàn tất cấu hình đa quả!")
-                        self.click_rect(btn_apply)
+                    if self.step_setup_multi_filter(frame, fruit_names):
                         filter_done = True
-                        time.sleep(0.8)
+                    time.sleep(0.5)
                     continue
 
                 # 3. Harvest Window
-                in_harvest_window = (
-                    self.find_template(frame, "btn_loc", threshold=0.68) is not None or
-                    self.find_template(frame, "btn_thu_hoach", threshold=0.68) is not None or
-                    self.is_filter_empty(frame)
-                )
+                in_harvest_window = self.is_harvest_window_open(frame)
                 if in_harvest_window:
                     if not filter_done:
                         self._set_state(FarmState.APPLYING_FILTER)
-                        btn_loc = self.find_template(frame, "btn_loc", threshold=0.68)
+                        btn_loc = self.find_filter_button(frame)
                         if btn_loc:
                             self._log(f"🔍 [BẢNG VƯỜN] Đang mở bảng thu hoạch! Bấm nút 'Lọc' để cấu hình {len(fruit_names)} loại quả...")
                             self.click_rect(btn_loc)
@@ -1451,7 +1657,14 @@ class FarmEngine:
                     if harvested:
                         stuck_scrolls = 0
                         total_scrolls = 0
-                    elif should_scroll:
+                    elif not should_scroll:
+                        self._log("🏁 [XONG NHÓM 2] Danh sách không thể cuộn thêm! Hoàn tất nhóm thu tự do.")
+                        break
+                    else:
+                        cards = self.digit_reader.scan_cards(frame)
+                        if not self.can_harvest_list_scroll(cards, frame):
+                            self._log(f"🏁 [XONG NHÓM 2] Bảng không đủ quả để cuộn (chỉ có {len(cards)} thẻ). Dừng lại!")
+                            break
                         total_scrolls += 1
                         if total_scrolls > 40:
                             self._log("🏁 [XONG NHÓM 2] Đã đạt giới hạn quét tối đa (40 lần cuộn)!")
@@ -1484,13 +1697,13 @@ class FarmEngine:
 
                 if not getattr(self, "_teleported_to_oliver", False):
                     # Nếu đã thấy icon giỏ hàng của Oliver (Hình 1), nhân vật đã đứng trước Oliver -> bỏ qua nút Bán, sang thẳng Thu hoạch
-                    if self.find_template(frame, "oliver_basket", threshold=0.65) is not None:
+                    if self.find_template(frame, "oliver_basket", threshold=0.75) is not None:
                         self._log("ℹ️ [ĐÃ Ở TRƯỚC CỬA HÀNG] Đã đứng trước ông Oliver (thấy icon giỏ hàng)! Bỏ qua nút 'Bán', chuyển thẳng tới nút 'Thu hoạch'...")
                         self._teleported_to_oliver = True
                     elif hit_b1:
                         self._set_state(FarmState.TELEPORTING)
                         self._log("🚀 [BƯỚC 1] Thấy nút 'Bán' trên HUD! Bấm để dịch chuyển nhân vật tới trước mặt ông bán quả (Oliver)...")
-                        self.click_rect(hit_b1)
+                        self.click_hud_sell_button(hit_b1)
                         self._teleported_to_oliver = True
                         time.sleep(2.0)
                         f_chk, _ = self.capturer.capture(None)
@@ -1499,11 +1712,15 @@ class FarmEngine:
                             self.click_rect(close_btn)
                             time.sleep(0.8)
                         continue
+                    else:
+                        time.sleep(0.3)
+                        continue
 
+                # CHỈ bấm Thu hoạch khi đã xác nhận đứng trước Oliver
                 if hit_b2:
                     self._set_state(FarmState.OPENING_HARVEST)
                     self._log("🌾 [BƯỚC 2] Thấy nút 'Thu hoạch' trên HUD! Bấm mở bảng nông sản...")
-                    self.click_rect(hit_b2)
+                    self.click_hud_harvest_button(hit_b2)
                     time.sleep(1.2)
                     continue
 
@@ -1528,27 +1745,55 @@ class FarmEngine:
 
         self._log(f"📋 [KẾ HOẠCH] {len(cat_a)} loại quả có cài kg (Nhóm 1), {len(cat_b)} loại quả thu tự do (Nhóm 2).")
 
-        # 1. Phase 1: Category A
-        for rule in cat_a:
+        # 1. Phase 1: Category A (Tuần tự từng loại quả, tự động chuyển tiếp)
+        for idx, rule in enumerate(cat_a):
             if self._stop_event:
                 break
             self.stats["current_fruit"] = rule.name
             self.stats["max_kg"] = rule.max_kg
-            self._log(f"👉 [NHÓM 1] Bắt đầu thu hoạch '{rule.name}' (< {rule.max_kg:.2f} kg)...")
+            self._log(f"👉 [NHÓM 1 - {idx+1}/{len(cat_a)}] Bắt đầu thu hoạch '{rule.name}' (< {rule.max_kg:.2f} kg)...")
+            
+            harvested_before = self.stats["harvested_count"]
             self._harvest_single_fruit(rule.name, rule.max_kg)
+            harvested_in_round = self.stats["harvested_count"] - harvested_before
 
-        # 2. Phase 2: Category B
+            if self._stop_event:
+                break
+
+            # Tự động bán hoặc đóng bảng về màn hình chính trước Oliver để chuẩn bị cho quả tiếp theo
+            if self.cfg_mgr.auto_sell and harvested_in_round > 0:
+                self._log(f"💰 [BÁN TỰ ĐỘNG] Đã thu {harvested_in_round} quả '{rule.name}'. Tự động bán tại Oliver trước khi đổi quả...")
+                self.step_sell_cycle()
+            else:
+                self._log("🚪 [HOÀN TẤT QUẢ] Đóng bảng thu hoạch để trở về màn hình chính trước Oliver...")
+                self.close_harvest_window()
+
+            time.sleep(1.0)
+
+        # 2. Phase 2: Category B (Thu hoạch tự do không OCR)
         if cat_b and not self._stop_event:
             cat_b_names = [r.name for r in cat_b]
             self.stats["current_fruit"] = "Nhóm Thu Tự Do"
             self.stats["max_kg"] = 0.0
             self._log(f"👉 [NHÓM 2] Bắt đầu thu hoạch tự do: {', '.join(cat_b_names)}...")
+            
+            harvested_before = self.stats["harvested_count"]
             self._harvest_multi_fruits_fast(cat_b_names)
+            harvested_in_round = self.stats["harvested_count"] - harvested_before
 
-        # 3. Phase 3: Final Sell
+            if not self._stop_event:
+                if self.cfg_mgr.auto_sell and harvested_in_round > 0:
+                    self.step_sell_cycle()
+                else:
+                    self.close_harvest_window()
+
+        # 3. Phase 3: Final Sell (Nếu còn sót nông sản trong túi)
         if self.cfg_mgr.auto_sell and not self._stop_event and self.stats["harvested_count"] > 0:
-            self._log("💰 [BÁN CUỐI CÙNG] Thực hiện đợt bán cuối cùng để làm sạch túi đồ...")
-            self.step_sell_cycle()
+            f_check, _ = self.capturer.capture(None)
+            sellable_now = self.count_sellable_crops_in_shop(f_check)
+            if sellable_now > 0:
+                self._log("💰 [BÁN CUỐI CÙNG] Thực hiện đợt bán cuối cùng để làm sạch túi đồ...")
+                self.step_sell_cycle()
 
         if not self._stop_event:
             self._set_state(FarmState.COMPLETED)

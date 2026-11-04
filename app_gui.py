@@ -32,7 +32,7 @@ class AutoFishingApp:
         # Dimensions: compact by default, fits comfortably on 1080p without blocking game action
         self.expanded_w = 520
         self.expanded_h = 580
-        self.mini_h = 175
+        self.mini_h = 210
         self.is_mini = False
         
         self.root.geometry(f"{self.expanded_w}x{self.expanded_h}")
@@ -146,6 +146,21 @@ class AutoFishingApp:
         self.btn_tab_farm.pack(side="left")
 
         # Mini Mode & Window Quick Controls on the right of mode bar
+        self.toggle_mini_btn = tk.Button(
+            mode_bar,
+            text="🗕 Thu Gọn",
+            font=("Segoe UI", 8, "bold"),
+            bg="#8aadf4",
+            fg="#181825",
+            activebackground="#7dc4e4",
+            relief="flat",
+            cursor="hand2",
+            padx=8,
+            pady=1,
+            command=self._toggle_mini_mode
+        )
+        self.toggle_mini_btn.pack(side="right", padx=(4, 6))
+
         trans_check = tk.Checkbutton(
             mode_bar,
             text="🌓 Mờ",
@@ -308,7 +323,7 @@ class AutoFishingApp:
         opts_bar = tk.Frame(self.container_fishing, bg="#181825")
         opts_bar.pack(fill="x", padx=10, pady=(2, 4))
 
-        self.toggle_mini_btn = tk.Button(
+        self.btn_mini_opts = tk.Button(
             opts_bar,
             text="🗕 Thu Gọn",
             font=("Segoe UI", 8, "bold"),
@@ -321,7 +336,7 @@ class AutoFishingApp:
             pady=1,
             command=self._toggle_mini_mode
         )
-        self.toggle_mini_btn.pack(side="right")
+        self.btn_mini_opts.pack(side="right")
 
         test_btn = tk.Button(
             opts_bar,
@@ -889,7 +904,7 @@ class AutoFishingApp:
         if hasattr(self, "farm_log_frame") and self.farm_log_frame.winfo_ismapped():
             self.farm_log_frame.pack_forget()
         self.root.geometry(f"{self.expanded_w}x{self.mini_h}")
-        self.toggle_mini_btn.config(text="🗖 Mở Rộng", bg="#a6da95")
+        self._update_mini_btn_state(True)
         self.is_mini = True
 
     def _expand_farm_ui(self):
@@ -899,7 +914,7 @@ class AutoFishingApp:
         if hasattr(self, "farm_log_frame") and not self.farm_log_frame.winfo_ismapped():
             self.farm_log_frame.pack(fill="both", expand=True, padx=10, pady=(2, 6))
         self.root.geometry(f"{self.expanded_w}x{self.expanded_h}")
-        self.toggle_mini_btn.config(text="🗕 Thu Gọn", bg="#8aadf4")
+        self._update_mini_btn_state(False)
         self.is_mini = False
 
     def start_farm_bot(self):
@@ -987,6 +1002,14 @@ class AutoFishingApp:
         alpha = 0.88 if self.is_transparent.get() else 1.0
         self.root.attributes("-alpha", alpha)
 
+    def _update_mini_btn_state(self, is_mini: bool):
+        text = "🗖 Mở Rộng" if is_mini else "🗕 Thu Gọn"
+        bg = "#a6da95" if is_mini else "#8aadf4"
+        if hasattr(self, "toggle_mini_btn"):
+            self.toggle_mini_btn.config(text=text, bg=bg)
+        if hasattr(self, "btn_mini_opts"):
+            self.btn_mini_opts.config(text=text, bg=bg)
+
     def _toggle_mini_mode(self):
         if not self.is_mini:
             if self.active_mode == "FARM":
@@ -994,7 +1017,7 @@ class AutoFishingApp:
             else:
                 self.notebook_frame.pack_forget()
                 self.root.geometry(f"{self.expanded_w}x{self.mini_h}")
-                self.toggle_mini_btn.config(text="🗖 Mở Rộng", bg="#a6da95")
+                self._update_mini_btn_state(True)
                 self.is_mini = True
         else:
             if self.active_mode == "FARM":
@@ -1002,7 +1025,7 @@ class AutoFishingApp:
             else:
                 self.notebook_frame.pack(fill="both", expand=True, padx=10, pady=(0, 6))
                 self.root.geometry(f"{self.expanded_w}x{self.expanded_h}")
-                self.toggle_mini_btn.config(text="🗕 Thu Gọn", bg="#8aadf4")
+                self._update_mini_btn_state(False)
                 self.is_mini = False
 
     def _copy_debug_log(self):

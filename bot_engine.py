@@ -95,6 +95,9 @@ class BotEngine:
         # P1c: Fast RegionScanner for fixed game UI modals/buttons & ProgressWatchdog
         tpls = config.get("templates", {})
         ths = config.get("thresholds", {})
+        reel_tpl = tpls.get('b2_giat_can', 'assets/B2_DangCau')
+        if os.path.isfile(reel_tpl) and 'B2_DangCau' in reel_tpl:
+            reel_tpl = os.path.dirname(reel_tpl)
         self.scanner = RegionScanner([
             ScanTarget("bag_toast",    tpls.get("b5_tui_day_toast", "assets/B5_TuiDay/toast_tui_day.png"),  (0.25, 0.15, 0.75, 0.45), ths.get("b5_tui_day", 0.75)),
             ScanTarget("bag_speech",   tpls.get("b5_tui_day_speech", "assets/B5_TuiDay/speech_tui_day.png"), (0.15, 0.15, 0.85, 0.85), ths.get("b5_tui_day", 0.72)),
@@ -103,7 +106,7 @@ class BotEngine:
             ScanTarget("done_title",   tpls.get("b4_hoan_thanh_title", "assets/B4_SuaCan/title_hoan_thanh"), (0.15, 0.05, 0.85, 0.85), ths.get("b4_sua_can", 0.70)),
             ScanTarget("ok",           tpls.get("b4_ok_btn", "assets/B4_SuaCan/btn_ok"),       (0.20, 0.40, 0.80, 0.90), ths.get("b4_btn_ok", 0.70)),
             ScanTarget("keep",         tpls.get("b3_bao_quan", "assets/B3_BaoQuan"),          (0.65, 0.65, 0.95, 0.95), ths.get("b3_bao_quan", 0.70)),
-            ScanTarget("reel",         tpls.get("b2_giat_can", "assets/B2_DangCau"),          (0.65, 0.55, 1.00, 1.00), ths.get("b2_giat_can", 0.60)),
+            ScanTarget("reel",         reel_tpl,                               (0.65, 0.55, 1.00, 1.00), ths.get("b2_giat_can", 0.60)),
             ScanTarget("cast",         tpls.get("b1_quang_can", "assets/B1_QuangCan"),         (0.75, 0.60, 0.95, 0.80), ths.get("b1_quang_can", 0.70)),
             ScanTarget("card_open",    tpls.get("b6_btn_mo", "assets/B6_GoiThe/btn_mo.png"),   (0.70, 0.65, 0.98, 0.95), ths.get("b6_goi_the", 0.70)),
             ScanTarget("card_prompt",  tpls.get("b6_prompt_space", "assets/B6_GoiThe/prompt_space.png"), (0.35, 0.85, 0.65, 1.00), ths.get("b6_goi_the", 0.70)),

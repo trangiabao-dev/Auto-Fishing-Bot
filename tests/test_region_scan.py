@@ -135,3 +135,34 @@ def test_keep_region_excludes_share_button(tmp_path):
     assert hit.found, "Bao quan button at x=1450 must be detected"
     assert hit.x == 1450 and hit.y == 800
 
+
+
+def test_reel_detection_on_stuck_frame_100232():
+    import os
+    p = os.path.join(r"D:\ToolPT", "corpus", "stuck", "100232.jpg")
+    if not os.path.isfile(p):
+        pytest.skip("Corpus stuck image 100232.jpg not present")
+    img = cv2.imread(p)
+    assert img is not None
+    scanner = RegionScanner([
+        ScanTarget("reel", os.path.join(r"D:\ToolPT", "assets", "B2_DangCau"), (0.65, 0.55, 1.00, 1.00), 0.65)
+    ])
+    hit = scanner.scan(img)["reel"]
+    assert hit.found is True
+    assert hit.score >= 0.90
+    assert hit.template == "inner_giat_can.png"
+
+
+def test_template_matcher_match_on_directory():
+    import os
+    from core.detector import TemplateMatcher
+    p = os.path.join(r"D:\ToolPT", "corpus", "stuck", "100232.jpg")
+    if not os.path.isfile(p):
+        pytest.skip("Corpus stuck image 100232.jpg not present")
+    img = cv2.imread(p)
+    matcher = TemplateMatcher()
+    b2_dir = os.path.join(r"D:\ToolPT", "assets", "B2_DangCau")
+    res = matcher.match(img, b2_dir, threshold=0.65, multi_scale=False)
+    assert res.found is True
+    assert res.confidence >= 0.90
+    assert res.template_name == "inner_giat_can.png"

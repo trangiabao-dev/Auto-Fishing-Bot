@@ -206,10 +206,11 @@ class InputSimulator:
         ctypes.windll.user32.keybd_event(vk, scancode, 2, 0)  # 2 = KEYEVENTF_KEYUP
         return True
 
-    def drag(self, x0: int, y0: int, x1: int, y1: int, duration_s: float = 0.22, steps: int = 12, ensure_focus: bool = True) -> None:
+    def drag(self, x0: int, y0: int, x1: int, y1: int, duration_s: float = 0.35, steps: int = 20, ensure_focus: bool = True) -> None:
         """
-        Simulates a mouse drag gesture from (x0, y0) to (x1, y1).
-        Essential for scrolling mobile-ported Unity ScrollRect lists reliably.
+        Simulates a human-like mouse drag gesture from (x0, y0) to (x1, y1).
+        Dispatches relative mouse movement (dx, dy) alongside SetCursorPos
+        to trigger Unity uGUI ScrollRect drag handlers consistently on PC.
         """
         if ensure_focus:
             self.focus_game_window()
@@ -219,17 +220,26 @@ class InputSimulator:
         ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
         time.sleep(0.04)
 
+        prev_x, prev_y = int(x0), int(y0)
+        dt = duration_s / float(max(1, steps))
+
         for step in range(1, steps + 1):
             t = step / float(steps)
             cur_x = int(x0 + (x1 - x0) * t)
             cur_y = int(y0 + (y1 - y0) * t)
+
+            dx = cur_x - prev_x
+            dy = cur_y - prev_y
+            prev_x, prev_y = cur_x, cur_y
+
             ctypes.windll.user32.SetCursorPos(cur_x, cur_y)
-            time.sleep(duration_s / float(steps))
+            ctypes.windll.user32.mouse_event(MOUSEEVENTF_MOVE, dx, dy, 0, 0)
+            time.sleep(dt)
 
         ctypes.windll.user32.SetCursorPos(int(x1), int(y1))
-        time.sleep(0.04)
+        time.sleep(0.05)
         ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-        time.sleep(0.15)
+        time.sleep(0.10)
 
     def scroll(self, delta: int = -120, ensure_focus: bool = True) -> None:
         """

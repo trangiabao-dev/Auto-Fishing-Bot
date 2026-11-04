@@ -90,6 +90,16 @@ class TemplateMatcher:
         Uses native 1.0x scale first; only if below threshold and multi_scale is True does it evaluate multi-scale.
         Always finds the GLOBAL MAXIMUM across all scales to avoid false downscale matches.
         """
+        if template_path and os.path.isdir(template_path):
+            return self.match_any(
+                screen_bgr,
+                template_path,
+                threshold=threshold,
+                screen_offset=screen_offset,
+                grayscale=grayscale,
+                multi_scale=multi_scale
+            )
+
         load_res = self.load_template(template_path, grayscale=grayscale)
         if load_res is None:
             return MatchResult(found=False, confidence=0.0)

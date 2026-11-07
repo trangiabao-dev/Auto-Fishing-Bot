@@ -47,10 +47,16 @@ def build():
     # Chỉ copy các template thực tế cần thiết, lọc bỏ ảnh mẫu test, archive và ảnh debug
     def ignore_junk(folder, contents):
         ignored = []
+        rel_folder = os.path.relpath(folder, os.path.join(base_dir, "assets")).replace("\\", "/")
         for c in contents:
-            if c in ("raw_samples", "thong bao tui da day", "tin nhan tui da day", "archive", "__pycache__") or c.startswith(("im1_", "im2_", "user_im", "debug_", "scratch_")):
+            if c in ("raw_samples", "thong bao tui da day", "tin nhan tui da day", "__pycache__", "badges") or c.startswith(("im1_", "im2_", "user_im", "debug_", "scratch_")):
                 ignored.append(c)
-            elif "farm" not in folder and (c.endswith(".jpg") or c == "anh_man_hinh_bot_thay.png"):
+            elif c == "archive" and rel_folder != "B2_DangCau/vat_neo_ten":
+                ignored.append(c)
+            # Bỏ qua các ảnh chụp màn hình debug/thử nghiệm ở thư mục gốc assets/
+            elif rel_folder == "." and (c.endswith((".jpg", ".png")) and c not in ("prompt_space_cyan.png", "prompt_space_brown_1080p.png")):
+                ignored.append(c)
+            elif c == "anh_man_hinh_bot_thay.png":
                 ignored.append(c)
         return ignored
 
@@ -64,9 +70,12 @@ def build():
     if os.path.exists(src_farm_cfg):
         shutil.copy2(src_farm_cfg, os.path.join(dst_cfg_dir, "farm_config.json"))
 
-    # Đảm bảo thư mục debug_hut_ca có sẵn cấu trúc 2 thư mục con (anh & debug)
+    # Đảm bảo thư mục debug_hut_ca và telemetry có sẵn cấu trúc (kèm file giữ chỗ để zip không bỏ sót thư mục rỗng)
     os.makedirs(os.path.join(dist_dir, "debug_hut_ca", "anh"), exist_ok=True)
     os.makedirs(os.path.join(dist_dir, "debug_hut_ca", "debug"), exist_ok=True)
+    os.makedirs(os.path.join(dist_dir, "telemetry"), exist_ok=True)
+    with open(os.path.join(dist_dir, "telemetry", ".gitkeep"), "w") as f:
+        pass
 
     # Nén file zip phân phối
     zip_out = os.path.join(base_dir, "dist", "AutoFishingBot-Standalone")

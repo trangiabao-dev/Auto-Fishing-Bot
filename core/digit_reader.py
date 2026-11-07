@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
+from core.path_utils import get_digits_dir
 
 
 @dataclass(frozen=True)
@@ -43,9 +44,8 @@ class HarvestCard:
 class DigitReader:
     def __init__(self, digits_dir: Optional[str] = None):
         if digits_dir is None:
-            # Default to assets/farm/digits
-            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            digits_dir = os.path.join(base_dir, "assets", "farm", "digits")
+            # Default to assets/farm/digits via path_utils
+            digits_dir = get_digits_dir()
 
         self.digits_dir = digits_dir
         self.digits: Dict[str, np.ndarray] = {}
@@ -73,21 +73,29 @@ class DigitReader:
                 best_d = d
         return best_d, best_score
 
-    def read_weight_from_strip(self, strip_mask: np.ndarray, gap_max: int = 8) -> float:
+    def read_weight_from_strip(self, strip_mask: np.ndarray, gap_max: int = 8, scale: float = 1.0) -> float:
         """
         Parses weight from a binarized mask of the strip to the left of 'kg'.
         Scans right-to-left starting closest to 'kg', clustering contiguous digits and dot.
         Rejects noise blobs, truncations, and handles weights up to 9999.99kg.
         Fails-closed (returns 9999.0) if unreadable or truncated to guarantee giant crops are never harvested.
+        Multi-scale aware across resolutions.
         """
+        min_dot_w = max(1, int(1 * scale))
+        max_dot_w = max(3, int(6 * scale))
+        min_dot_h = max(1, int(2 * scale))
+        max_dot_h = max(3, int(6 * scale))
+        min_by = max(3, int(6 * scale))
+        min_barea = max(1, int(2 * scale * scale))
+        min_bh = max(1, int(2 * scale))
+        min_bw = max(1, int(2 * scale))
+
         n, _, stats, _ = cv2.connectedComponentsWithStats(strip_mask)
         blobs = []
         for bi in range(1, n):
             bx, by, bw, bh, barea = stats[bi]
-            # Decimal dot in 1080p can be 3x2px (bh=2, barea>=3)
-            is_dot = (2 <= bw <= 6 and 2 <= bh <= 6 and by >= 8)
-            # Dot is 2..6px high, digits are >= 10px high. Anything with bh < 2 or barea < 3 is noise!
-            if barea < 3 or bh < 2 or (bw < 3 and not is_dot):
+            is_dot = (min_dot_w <= bw <= max_dot_w and min_dot_h <= bh <= max_dot_h and by >= min_by)
+            if barea < min_barea or bh < min_bh or (bw < min_bw and not is_dot):
                 continue
             blobs.append((int(bx), int(by), int(bw), int(bh)))
 
@@ -97,18 +105,15 @@ class DigitReader:
         # Sort right-to-left (starting from the one nearest to 'kg')
         blobs.sort(key=lambda b: -b[0])
 
+        effective_gap = max(gap_max, int(12 * scale))
         group = [blobs[0]]
         for b in blobs[1:]:
             prev_left = group[-1][0]
             curr_right = b[0] + b[2]
-            # If distance between left edge of previous blob and right edge of current blob > gap_max,
-            # we have reached the crop name boundary!
-            if prev_left - curr_right > gap_max:
+            if prev_left - curr_right > effective_gap:
                 break
             group.append(b)
 
-        # Truncation check: if the leftmost digit touches or exceeds the left strip border (bx <= 0),
-        # an integer digit might have been cut off (e.g. 1000.50 -> 0.50). Reject as protected giant crop!
         if group[-1][0] <= 0:
             return 9999.0
 
@@ -120,8 +125,7 @@ class DigitReader:
         digits_after_dot = 0
 
         for bx, by, bw, bh in group:
-            # A decimal dot is small and sits near the baseline (by >= 8, 2..6px wide, 2..6px high)
-            if 2 <= bw <= 6 and 2 <= bh <= 6 and by >= 8:
+            if min_dot_w <= bw <= max_dot_w and min_dot_h <= bh <= max_dot_h and by >= min_by:
                 if not has_dot:
                     num_str += "."
                     has_dot = True
@@ -129,8 +133,8 @@ class DigitReader:
 
             patch = strip_mask[by:by + bh, bx:bx + bw]
             d, score = self._classify_digit_patch(patch)
-            if score < 0.35:
-                # Unrecognized or blurry glyph -> fail-closed to protect crops
+            min_score = 0.30 if scale < 0.85 else 0.35
+            if score < min_score:
                 return 9999.0
 
             num_str += d
@@ -139,10 +143,6 @@ class DigitReader:
             else:
                 digits_after_dot += 1
 
-        # STRICT PLAY TOGETHER WEIGHT VALIDATION:
-        # 1. At least 1 integer digit before dot (e.g. '0.86', '3.17', '1000.50')
-        # 2. Must contain exactly 1 decimal dot
-        # 3. Game ALWAYS formats weights with exactly 2 decimal places (e.g. .50, .00, .15)
         if digits_before_dot == 0 or not has_dot or digits_after_dot != 2:
             return 9999.0
 
@@ -151,54 +151,133 @@ class DigitReader:
         except Exception:
             return 9999.0
 
+    def read_weight_at_pos(self, frame_bgr: np.ndarray, kg_x: int, kg_y: int, scale: Optional[float] = None) -> float:
+        """Rapid single-card OCR (< 1ms): reads weight directly from local strip of (kg_x, kg_y)."""
+        if self.kg_tpl is None or frame_bgr is None or frame_bgr.size == 0:
+            return 9999.0
+        s = scale or getattr(self, "detected_scale", None) or 1.0
+        fh, fw = frame_bgr.shape[:2]
+        x0 = max(0, kg_x - int(120 * s))
+        y0 = max(0, kg_y - int(6 * s))
+        y1 = min(fh, kg_y + int(19 * s))
+        crop = frame_bgr[y0:y1, x0:kg_x]
+        if crop.size == 0 or crop.shape[0] < 4 or crop.shape[1] < 10:
+            return 9999.0
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        mask = cv2.inRange(gray, 115, 205)
+        return self.read_weight_from_strip(mask, gap_max=max(6, int(8 * s)), scale=s)
+
     def scan_cards(self, frame_bgr: np.ndarray, origin: Tuple[int, int] = (0, 0)) -> List[HarvestCard]:
         """
         Scans all visible harvest item cards in the 'Thu hoạch trái' window.
         Returns cards sorted top-to-bottom, left-to-right with exact parsed weights and button coords.
+        Multi-scale aware across resolutions.
         """
         if self.kg_tpl is None:
             return []
 
+        fh, fw = frame_bgr.shape[:2]
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
         mask = cv2.inRange(gray, 115, 205)
 
-        res = cv2.matchTemplate(mask, self.kg_tpl, cv2.TM_CCOEFF_NORMED)
-        locs = np.where(res >= 0.75)
+        # Multi-scale kg matching
+        scales = (1.0, 0.75, 0.70, 0.67, 0.80, 0.85, 0.53, 0.50, 1.25, 1.33)
+        h_ratio = round(fh / 1080.0, 2)
+        if h_ratio not in scales and 0.3 <= h_ratio <= 2.5:
+            scales = (h_ratio,) + scales
+
+        best_v = 0.0
+        best_s = 1.0
+        # Fast-track: test cached scale first (< 10ms)
+        if getattr(self, "detected_scale", None) is not None:
+            s_cached = self.detected_scale
+            tw = int(self.kg_tpl.shape[1] * s_cached)
+            th = int(self.kg_tpl.shape[0] * s_cached)
+            if tw >= 6 and th >= 6 and mask.shape[0] >= th and mask.shape[1] >= tw:
+                scaled = cv2.resize(self.kg_tpl, (tw, th))
+                r = cv2.matchTemplate(mask, scaled, cv2.TM_CCOEFF_NORMED)
+                v = float(r.max())
+                locs_c = np.where(r >= 0.74)
+                if v >= 0.76 and len(locs_c[0]) >= 2:
+                    best_v = v
+                    best_s = s_cached
+
+        if best_v < 0.75:
+            scale_stats = []
+            for s in scales:
+                tw = int(self.kg_tpl.shape[1] * s)
+                th = int(self.kg_tpl.shape[0] * s)
+                if tw >= 6 and th >= 6 and mask.shape[0] >= th and mask.shape[1] >= tw:
+                    scaled = cv2.resize(self.kg_tpl, (tw, th))
+                    r = cv2.matchTemplate(mask, scaled, cv2.TM_CCOEFF_NORMED)
+                    v = float(r.max())
+                    if v >= 0.72:
+                        locs = np.where(r >= 0.72)
+                        pts = list(zip(locs[1], locs[0]))
+                        dedup = []
+                        for p in pts:
+                            if not any(abs(p[0] - d[0]) < 15 and abs(p[1] - d[1]) < 15 for d in dedup):
+                                dedup.append(p)
+                        scale_stats.append((s, len(dedup), v))
+                    else:
+                        scale_stats.append((s, 0, v))
+
+            # Prioritize scales that produce multiple card hits (>= 2 hits) over single glitches
+            multi_hits = [st for st in scale_stats if st[1] >= 2]
+            if multi_hits:
+                best_st = max(multi_hits, key=lambda st: (st[1] >= 4, st[2], st[1]))
+                best_s = best_st[0]
+            elif scale_stats:
+                best_st = max(scale_stats, key=lambda st: st[2])
+                best_s = best_st[0]
+
+            self.detected_scale = best_s
+
+        scaled_kg = cv2.resize(self.kg_tpl, (int(self.kg_tpl.shape[1] * best_s), int(self.kg_tpl.shape[0] * best_s)))
+        res = cv2.matchTemplate(mask, scaled_kg, cv2.TM_CCOEFF_NORMED)
+        threshold = 0.60 if best_s < 0.85 else 0.75
+        hsv_full = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+        mask_cyan_full = cv2.inRange(hsv_full, np.array([90, 100, 100]), np.array([115, 255, 255]))
+
+        locs = np.where(res >= threshold)
         hits = []
+        tw_kg = int(self.kg_tpl.shape[1] * best_s)
+        th_kg = int(self.kg_tpl.shape[0] * best_s)
         for pt in zip(*locs[::-1]):
-            if not any(abs(pt[0] - p[0]) < 10 and abs(pt[1] - p[1]) < 10 for p in hits):
+            # Reject false kg matches occurring inside cyan 'Thu hoach' buttons
+            if mask_cyan_full[pt[1]:pt[1] + th_kg, pt[0]:pt[0] + tw_kg].mean() > 30:
+                continue
+            if not any(abs(pt[0] - p[0]) < 12 and abs(pt[1] - p[1]) < 12 for p in hits):
                 hits.append(pt)
 
-        # Robust row clustering by vertical proximity (dy > 25px creates a new row)
+        # Robust row clustering by vertical proximity (dy > 20*s creates a new row)
+        row_gap = max(12, int(25 * best_s))
         hits.sort(key=lambda p: p[1])
         rows: List[List[Tuple[int, int]]] = []
         row_y: Optional[int] = None
         for p in hits:
-            if row_y is None or p[1] - row_y > 25:
+            if row_y is None or p[1] - row_y > row_gap:
                 rows.append([])
                 row_y = p[1]
             rows[-1].append(p)
         hits = [p for r in rows for p in sorted(r, key=lambda q: q[0])]
 
-        fh, fw = frame_bgr.shape[:2]
-        hsv_full = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
-        mask_cyan_full = cv2.inRange(hsv_full, np.array([90, 100, 100]), np.array([115, 255, 255]))
-
         cards: List[HarvestCard] = []
         for idx, (kg_x, kg_y) in enumerate(hits):
             # Dynamic cyan button calibration:
             # Searches for the real 'Thu hoạch' button contour in the card's row slice to the right of 'kg'.
-            # Immune to fruit name length differences (e.g. 'Sầu riêng' 9 chars vs 'Hạt dẻ' 6 chars).
-            y0_s = max(0, kg_y - 25)
-            y1_s = min(fh, kg_y + 90)
-            x0_s = kg_x + 30
-            x1_s = min(fw, kg_x + 400)
+            y0_s = max(0, kg_y - int(25 * best_s))
+            y1_s = min(fh, kg_y + int(90 * best_s))
+            x0_s = kg_x + int(20 * best_s)
+            x1_s = min(fw, kg_x + int(420 * best_s))
             slice_cyan = mask_cyan_full[y0_s:y1_s, x0_s:x1_s]
             cnts, _ = cv2.findContours(slice_cyan, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             exact_btn = None
+            min_bw = max(30, int(60 * best_s))
+            min_bh = max(15, int(30 * best_s))
             for c in cnts:
                 bx, by, bw, bh = cv2.boundingRect(c)
-                if bw >= 70 and bh >= 35:
+                if bw >= min_bw and bh >= min_bh:
                     exact_btn = (x0_s + bx, y0_s + by, bw, bh)
                     break
 
@@ -208,36 +287,33 @@ class DigitReader:
                 btn_w = exact_btn[2]
                 btn_h = exact_btn[3]
             else:
-                btn_w = self.btn_tpl.shape[1] if self.btn_tpl is not None else 140
-                btn_h = self.btn_tpl.shape[0] if self.btn_tpl is not None else 85
-                btn_x = origin[0] + kg_x + 220
-                btn_y = origin[1] + kg_y - 9
+                btn_w = int(self.btn_tpl.shape[1] * best_s) if self.btn_tpl is not None else int(140 * best_s)
+                btn_h = int(self.btn_tpl.shape[0] * best_s) if self.btn_tpl is not None else int(85 * best_s)
+                btn_x = origin[0] + kg_x + int(220 * best_s)
+                btn_y = origin[1] + kg_y - int(9 * best_s)
 
             # VIEWPORT CLIPPING GUARD:
-            # Cards cut off at the bottom of the scroll container or with clipped cyan buttons.
-            # In 1080p, row 4 buttons end around Y=820px, bottom bar starts at Y=845px.
             is_clipped = False
-            if fh >= 900 and (btn_y + btn_h > int(fh * 0.81) or kg_y > int(fh * 0.79)):
+            if btn_y + btn_h > int(fh * 0.82) or kg_y > int(fh * 0.80):
                 is_clipped = True
             else:
                 x0_b, x1_b = max(0, btn_x), min(fw, btn_x + btn_w)
                 y0_b, y1_b = max(0, btn_y), min(fh, btn_y + btn_h)
-                if y1_b - y0_b < 40 or x1_b - x0_b < 60:
+                if y1_b - y0_b < min_bh or x1_b - x0_b < min_bw:
                     is_clipped = True
                 else:
                     crop = frame_bgr[y0_b:y1_b, x0_b:x1_b]
                     hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
                     mask_cyan = cv2.inRange(hsv, np.array([90, 100, 100]), np.array([115, 255, 255]))
-                    if np.mean(mask_cyan > 0) < 0.40:
+                    if np.mean(mask_cyan > 0) < 0.35:
                         is_clipped = True
 
-            # Crop wide 120px strip to the left of kg, and extend vertical range by (-6..+19)
-            # Accommodates giant numbers up to 9999.99kg without truncating high-order digits.
-            x0 = max(0, kg_x - 120)
-            y0 = max(0, kg_y - 6)
-            y1 = min(fh, kg_y + 19)
+            # Crop strip to the left of kg
+            x0 = max(0, kg_x - int(120 * best_s))
+            y0 = max(0, kg_y - int(6 * best_s))
+            y1 = min(fh, kg_y + int(19 * best_s))
             strip = mask[y0:y1, x0:kg_x]
-            weight = self.read_weight_from_strip(strip)
+            weight = self.read_weight_from_strip(strip, gap_max=max(6, int(8 * best_s)), scale=best_s)
 
             cards.append(HarvestCard(
                 card_index=idx + 1,

@@ -237,9 +237,10 @@ class InputSimulator:
             time.sleep(dt)
 
         ctypes.windll.user32.SetCursorPos(int(x1), int(y1))
-        time.sleep(0.05)
+        # Hold stationary at destination so Unity ScrollRect inertia velocity drops to 0!
+        time.sleep(0.18)
         ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-        time.sleep(0.10)
+        time.sleep(0.12)
 
     def scroll(self, delta: int = -120, ensure_focus: bool = True) -> None:
         """

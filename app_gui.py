@@ -24,6 +24,27 @@ def load_config(config_path: str = "config.json"):
         return json.load(f)
 
 
+def save_config(config_data: dict, config_path: str = "config.json"):
+    try:
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(config_data, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"Error saving config: {e}")
+
+
+def get_available_characters(archive_dir: str = "assets/B2_DangCau/vat_neo_ten/archive") -> list:
+    """Returns list of (display_name, filename) for all valid character templates in archive/."""
+    if not os.path.isdir(archive_dir):
+        return [("Columbinaa", "columbinaa.png")]
+    items = []
+    for f in sorted(os.listdir(archive_dir)):
+        fp = os.path.join(archive_dir, f)
+        if os.path.isfile(fp) and f.lower().endswith((".png", ".jpg", ".jpeg")):
+            name_no_ext = os.path.splitext(f)[0]
+            items.append((name_no_ext.capitalize(), f))
+    return items or [("Columbinaa", "columbinaa.png")]
+
+
 class AutoFishingApp:
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -32,7 +53,8 @@ class AutoFishingApp:
         # Dimensions: compact by default, fits comfortably on 1080p without blocking game action
         self.expanded_w = 520
         self.expanded_h = 580
-        self.mini_h = 210
+        self.mini_w = 500
+        self.mini_h = 180
         self.is_mini = False
         
         self.root.geometry(f"{self.expanded_w}x{self.expanded_h}")
@@ -59,6 +81,16 @@ class AutoFishingApp:
 
         # Load fishing engine configuration
         self.config = load_config()
+
+        # Resolve active character template from config
+        saved_char = self.config.get("fishing", {}).get("selected_character", "columbinaa.png")
+        archive_char_path = f"assets/B2_DangCau/vat_neo_ten/archive/{saved_char}"
+        fallback_char_path = f"assets/B2_DangCau/vat_neo_ten/{saved_char}"
+        active_char_path = archive_char_path if os.path.exists(archive_char_path) else fallback_char_path
+        if "templates" not in self.config:
+            self.config["templates"] = {}
+        self.config["templates"]["b2_ten_nhan_vat"] = active_char_path
+        self.config["templates"]["b2_vat_neo"] = active_char_path
 
         # Initialize Fishing Bot Engine
         self.engine = BotEngine(
@@ -284,6 +316,62 @@ class AutoFishingApp:
             anchor="e"
         )
         self.ticker_lbl.pack(side="right", fill="x", expand=True)
+
+        # Character Profile Selector Bar (Tab Câu Cá)
+        char_bar = tk.Frame(self.container_fishing, bg="#1e1e2e", padx=8, pady=3, highlightbackground="#313244", highlightthickness=1)
+        char_bar.pack(fill="x", padx=10, pady=(1, 3))
+
+        tk.Label(
+            char_bar,
+            text="👤 Nhân vật:",
+            font=("Segoe UI", 9, "bold"),
+            fg="#8aadf4",
+            bg="#1e1e2e"
+        ).pack(side="left", padx=(0, 4))
+
+        self.char_list = get_available_characters()
+        self.char_display_to_file = {d: f for d, f in self.char_list}
+        self.char_file_to_display = {f: d for d, f in self.char_list}
+
+        self.char_var = tk.StringVar()
+        curr_file = self.config.get("fishing", {}).get("selected_character", "columbinaa.png")
+        self.char_var.set(self.char_file_to_display.get(curr_file, self.char_list[0][0]))
+
+        self.char_combo = ttk.Combobox(
+            char_bar,
+            textvariable=self.char_var,
+            values=[d for d, f in self.char_list],
+            state="disabled",
+            width=20,
+            font=("Segoe UI", 8)
+        )
+        self.char_combo.pack(side="left", padx=4)
+        self.char_combo.bind("<<ComboboxSelected>>", self._on_character_combobox_selected)
+
+        self.is_char_locked = tk.BooleanVar(value=self.config.get("fishing", {}).get("character_locked", True))
+        self.btn_char_lock = tk.Button(
+            char_bar,
+            text="🔒 Đã khóa" if self.is_char_locked.get() else "🔓 Khóa lại",
+            font=("Segoe UI", 8, "bold"),
+            bg="#313244" if self.is_char_locked.get() else "#f5a97f",
+            fg="#a6da95" if self.is_char_locked.get() else "#181825",
+            activebackground="#45475a",
+            relief="flat",
+            cursor="hand2",
+            padx=8,
+            pady=1,
+            command=self._toggle_character_lock
+        )
+        self.btn_char_lock.pack(side="left", padx=4)
+
+        self.lbl_char_note = tk.Label(
+            char_bar,
+            text="Chỉ quét 1 tên" if self.is_char_locked.get() else "Chọn tên rồi khóa",
+            font=("Segoe UI", 8),
+            fg="#6e738d" if self.is_char_locked.get() else "#f5a97f",
+            bg="#1e1e2e"
+        )
+        self.lbl_char_note.pack(side="right")
 
         btn_frame = tk.Frame(self.container_fishing, bg="#181825")
         btn_frame.pack(fill="x", padx=10, pady=2)
@@ -903,7 +991,7 @@ class AutoFishingApp:
             self.farm_table_card.pack_forget()
         if hasattr(self, "farm_log_frame") and self.farm_log_frame.winfo_ismapped():
             self.farm_log_frame.pack_forget()
-        self.root.geometry(f"{self.expanded_w}x{self.mini_h}")
+        self.root.geometry(f"{self.mini_w}x{self.mini_h}")
         self._update_mini_btn_state(True)
         self.is_mini = True
 
@@ -1016,7 +1104,7 @@ class AutoFishingApp:
                 self._collapse_farm_ui()
             else:
                 self.notebook_frame.pack_forget()
-                self.root.geometry(f"{self.expanded_w}x{self.mini_h}")
+                self.root.geometry(f"{self.mini_w}x{self.mini_h}")
                 self._update_mini_btn_state(True)
                 self.is_mini = True
         else:
@@ -1090,6 +1178,54 @@ class AutoFishingApp:
             self.on_engine_log("=" * 45)
         except Exception as e:
             self.on_engine_log(f"❌ [LỖI SOI MẮT BOT]: {e}")
+
+    def _toggle_character_lock(self):
+        if self.is_char_locked.get():
+            # Mở khóa để người dùng chọn tên
+            self.is_char_locked.set(False)
+            self.char_combo.config(state="readonly")
+            self.btn_char_lock.config(text="🔓 Khóa lại", bg="#f5a97f", fg="#181825")
+            self.lbl_char_note.config(text="Hãy chọn tên rồi bấm Khóa", fg="#f5a97f")
+        else:
+            # Khóa lựa chọn
+            self._lock_character()
+
+    def _lock_character(self):
+        self.is_char_locked.set(True)
+        self.char_combo.config(state="disabled")
+        self.btn_char_lock.config(text="🔒 Đã khóa", bg="#313244", fg="#a6da95")
+        self.lbl_char_note.config(text="Chỉ quét 1 tên", fg="#6e738d")
+        self._apply_and_save_character()
+
+    def _on_character_combobox_selected(self, event=None):
+        # Tự động khóa và lưu ngay khi chọn từ danh sách
+        self._lock_character()
+
+    def _apply_and_save_character(self):
+        display_name = self.char_var.get()
+        filename = self.char_display_to_file.get(display_name, "columbinaa.png")
+        tpl_path = f"assets/B2_DangCau/vat_neo_ten/archive/{filename}"
+        if not os.path.exists(tpl_path):
+            tpl_path = f"assets/B2_DangCau/vat_neo_ten/{filename}"
+
+        if "fishing" not in self.config:
+            self.config["fishing"] = {}
+        self.config["fishing"]["selected_character"] = filename
+        self.config["fishing"]["character_locked"] = True
+        if "templates" not in self.config:
+            self.config["templates"] = {}
+        self.config["templates"]["b2_ten_nhan_vat"] = tpl_path
+        self.config["templates"]["b2_vat_neo"] = tpl_path
+
+        save_config(self.config)
+
+        if hasattr(self, "engine") and self.engine is not None:
+            name_thresh = self.config.get("thresholds", {}).get("b2_ten_nhan_vat", 0.65)
+            from core.plate_locator import PlateLocator, PlateTracker
+            self.engine.plate_locator = PlateLocator(tpl_path, min_score=name_thresh)
+            self.engine.plate_tracker = PlateTracker(self.engine.plate_locator)
+
+        self.on_engine_log(f"🔒 [NHÂN VẬT] Đã chọn và khóa: '{display_name}' ({filename}). Bot chỉ quét duy nhất template này!")
 
     def start_bot(self):
         if self.farm_engine.state != FarmState.STOPPED and self.farm_engine.state != FarmState.COMPLETED:

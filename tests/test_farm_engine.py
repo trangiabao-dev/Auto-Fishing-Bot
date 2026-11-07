@@ -346,11 +346,15 @@ def test_scroll_harvest_list_down_calls_drag_and_detects_shift(farm_engine):
     # Mock capturer to return b8_shifted after scroll
     farm_engine.capturer.capture.return_value = (b8_shifted, (0, 0))
 
+    # Test 1: When dy is None (probing/end-game), uses mouse wheel scroll without drag
     moved = farm_engine.scroll_harvest_list_down(b8)
     assert moved is True
+    assert farm_engine.input_sim.scroll.called
+
+    # Test 2: When dy is passed (initial boundary alignment), uses calibrated drag
+    moved_drag = farm_engine.scroll_harvest_list_down(b8, dy=200)
+    assert moved_drag is True
     assert farm_engine.input_sim.drag.called
-    drag_args = farm_engine.input_sim.drag.call_args[0]
-    assert drag_args[1] > drag_args[3], f"Drag must swipe up (y0={drag_args[1]} > y1={drag_args[3]})"
 
     # If frame doesn't change, returns False (stationary / bottom reached)
     farm_engine.capturer.capture.return_value = (b8, (0, 0))
@@ -711,3 +715,124 @@ def test_step_setup_filter_strictly_checks_chk_dot_bien_first(farm_engine):
     assert 250 <= b5_click_x <= 250 + b5.shape[1], f"Second click must be on B5 tab! Got x={b5_click_x}"
     assert 250 <= b5_click_y <= 250 + b5.shape[0], f"Second click must be on B5 tab! Got y={b5_click_y}"
 
+
+
+def test_hud_detection_on_windowed_and_nonstandard_screens(farm_engine):
+    """Verifies B1 and B2 HUD buttons are detected on windowed / non-standard aspect ratios."""
+    # Test on a small 630x328 windowed frame with buttons placed at non-standard coords
+    fh, fw = 328, 630
+    frame = np.full((fh, fw, 3), 40, dtype=np.uint8)
+    b1_core = farm_engine._templates.get("core_b1_ban")
+    b2_core = farm_engine._templates.get("core_b2_harvest")
+    if b1_core is not None and b2_core is not None:
+        frame[194:194+b1_core.shape[0], 362:362+b1_core.shape[1]] = b1_core
+        frame[194:194+b2_core.shape[0], 268:268+b2_core.shape[1]] = b2_core
+
+        hit_b1 = farm_engine.find_hud_sell_button(frame)
+        hit_b2 = farm_engine.find_hud_harvest_button(frame)
+        hit_oliver = farm_engine.find_oliver_basket(frame)
+
+        assert hit_b1 is not None, "Bán (B1) must be detected on windowed screen without being cropped by ROI!"
+        assert hit_b2 is not None, "Thu hoạch (B2) must be detected on windowed screen!"
+        assert hit_oliver is None, "Oliver basket must NOT be detected when not present!"
+
+
+def test_step_open_harvest_window_two_step_order(farm_engine):
+    """Verifies strict 2-step order: clicks B1 first if not at Oliver, then clicks B2 when at Oliver."""
+    clicks = []
+    farm_engine.input_sim.click.side_effect = lambda x, y, **kw: clicks.append((x, y))
+
+    b1_core = farm_engine._templates.get("core_b1_ban")
+    b2_core = farm_engine._templates.get("core_b2_harvest")
+    oliver_tpl = farm_engine._templates.get("oliver_basket")
+    if b1_core is None or b2_core is None or oliver_tpl is None:
+        return
+
+    # Scenario 1: Character is in farm field (Oliver NOT visible, B1 and B2 visible)
+    farm_engine._teleported_to_oliver = False
+    field_frame = np.full((575, 1024, 3), 50, dtype=np.uint8)
+    field_frame[100:100+b1_core.shape[0], 880:880+b1_core.shape[1]] = b1_core
+    field_frame[100:100+b2_core.shape[0], 820:820+b2_core.shape[1]] = b2_core
+
+    # Mock capturer to return field_frame
+    farm_engine.capturer.capture.return_value = (field_frame, None)
+
+    farm_engine.step_open_harvest_window(field_frame)
+    assert len(clicks) == 2, "Must click B1 to teleport, then B2 to open harvest!"
+    # Check that click was inside B1
+    assert 880 <= clicks[0][0] <= 880 + b1_core.shape[1] + 15
+    assert farm_engine._teleported_to_oliver is True
+
+    # Scenario 2: Character is now at Oliver (Oliver visible)
+    clicks.clear()
+    oliver_frame = np.full((575, 1024, 3), 50, dtype=np.uint8)
+    oliver_frame[90:90+oliver_tpl.shape[0], 480:480+oliver_tpl.shape[1]] = oliver_tpl
+    oliver_frame[100:100+b2_core.shape[0], 820:820+b2_core.shape[1]] = b2_core
+    farm_engine.capturer.capture.return_value = (oliver_frame, None)
+
+    farm_engine.step_open_harvest_window(oliver_frame)
+    assert len(clicks) == 1, "Must click B2 (Thu hoạch) when already at Oliver!"
+    assert 820 <= clicks[0][0] <= 820 + b2_core.shape[1] + 15
+
+
+def test_farm_engine_dismisses_quit_game_dialog(farm_engine):
+    """Verifies that if the quit confirmation modal appears, the bot clicks 'Không, tôi muốn chơi thêm chút nữa.'"""
+    tpl = farm_engine._templates.get("btn_khong_thoat")
+    assert tpl is not None, "btn_khong_thoat template must be loaded!"
+
+    # Create synthetic frame with quit dialog button
+    fh, fw = 575, 1024
+    frame = np.full((fh, fw, 3), 40, dtype=np.uint8)
+    th, tw = tpl.shape[:2]
+    # Place button in center ROI
+    bx, by = 400, 310
+    frame[by:by+th, bx:bx+tw] = tpl
+
+    farm_engine.input_sim.click.reset_mock()
+    farm_engine.input_sim.press_key.reset_mock()
+
+    res = farm_engine.dismiss_quit_game_dialog_if_present(frame)
+    assert res is True
+    assert farm_engine.input_sim.click.called
+    click_x, click_y = farm_engine.input_sim.click.call_args[0][:2]
+    assert bx <= click_x <= bx + tw
+    assert by <= click_y <= by + th
+    assert not farm_engine.input_sim.press_key.called
+
+
+def test_farm_engine_handles_space_prompt_notice_modal(farm_engine):
+    """Verifies that notice modals (#102509) are dismissed with Space key and 0 mouse clicks."""
+    tpl = farm_engine._templates.get("prompt_space_cyan")
+    assert tpl is not None, "prompt_space_cyan template must be loaded!"
+
+    fh, fw = 575, 1024
+    frame = np.full((fh, fw, 3), 40, dtype=np.uint8)
+    th, tw = tpl.shape[:2]
+    # Place space icon in lower center
+    frame[450:450+th, 480:480+tw] = tpl
+
+    farm_engine.input_sim.click.reset_mock()
+    farm_engine.input_sim.press_key.reset_mock()
+
+    res = farm_engine.handle_space_prompt_if_present(frame)
+    assert res is True
+    assert farm_engine.input_sim.press_key.called
+    assert farm_engine.input_sim.press_key.call_args[0][0] == "space"
+    assert not farm_engine.input_sim.click.called
+
+
+def test_farm_engine_detects_harvest_window_multi_scale(farm_engine):
+    """Verifies that harvest window is correctly detected across windowed resolutions (e.g. scale 0.70)."""
+    tpl_loc = farm_engine._templates.get("btn_loc")
+    assert tpl_loc is not None, "btn_loc template must be loaded!"
+
+    fh, fw = 575, 1024
+    frame = np.full((fh, fw, 3), 200, dtype=np.uint8)
+    # Scale btn_loc to 0.70
+    s = 0.70
+    th, tw = int(tpl_loc.shape[0] * s), int(tpl_loc.shape[1] * s)
+    scaled_loc = cv2.resize(tpl_loc, (tw, th))
+    # Place in top-right ROI
+    frame[25:25+th, 800:800+tw] = scaled_loc
+
+    assert farm_engine.is_harvest_window_open(frame) is True

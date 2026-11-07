@@ -37,6 +37,10 @@ from core.geometry import Rect
 
 HSV_LO = (50, 140, 110)
 HSV_HI = (78, 255, 255)
+# Sắc thái chữ cặp đôi (Cyan / Sky-blue)
+HSV_CYAN_LO = (95, 110, 130)
+HSV_CYAN_HI = (105, 255, 255)
+
 # Fractions of the frame: (x0, y0, x1, y1). The chat log prints the player's own nickname in the same
 # neon green as the plate; it must never be matched as a plate.
 CHAT_ZONE = (0.0, 0.50, 0.30, 1.0)
@@ -62,12 +66,19 @@ class _Template:
     mask: np.ndarray            # tight crop of the text mask, uint8 0/255
     text_xy: Tuple[int, int]    # where that crop sits inside the template image
     image_wh: Tuple[int, int]
+    mask_type: str = "green"    # "green" | "couple"
 
 
 def hue_mask(bgr: np.ndarray) -> np.ndarray:
     """uint8 0/255 mask of 'neon green' pixels (name-plate text)."""
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
     return cv2.inRange(hsv, HSV_LO, HSV_HI)
+
+
+def couple_plate_mask(bgr: np.ndarray) -> np.ndarray:
+    """uint8 0/255 mask of couple name-plate text (cyan text only, invariant to decorative badges)."""
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    return cv2.inRange(hsv, HSV_CYAN_LO, HSV_CYAN_HI)
 
 
 def _load_templates(path_or_dir: str) -> List[_Template]:
@@ -83,15 +94,22 @@ def _load_templates(path_or_dir: str) -> List[_Template]:
         img = cv2.imread(p, cv2.IMREAD_COLOR)
         if img is None:
             continue
+        # Try neon green mask first
         m = hue_mask(img)
         ys, xs = np.where(m > 0)
-        if len(xs) < 25:      # decorative badge without green text
-            continue
+        m_type = "green"
+        if len(xs) < 25:
+            # Try couple cyan / heart mask
+            m = couple_plate_mask(img)
+            ys, xs = np.where(m > 0)
+            m_type = "couple"
+        if len(xs) < 25:
+            continue  # Not a recognized plate format
         x0, y0, x1, y1 = int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
         out.append(_Template(os.path.basename(p), m[y0:y1, x0:x1].copy(), (x0, y0),
-                             (img.shape[1], img.shape[0])))
+                             (img.shape[1], img.shape[0]), mask_type=m_type))
     if not out:
-        raise ValueError(f"No template with neon-green text in: {path_or_dir}")
+        raise ValueError(f"No valid name plate template found in: {path_or_dir}")
     return out
 
 
@@ -102,6 +120,14 @@ class PlateLocator:
         self._min_score = min_score
         self._probe = tuple(scale_probe)
         self._max_blobs = max_blobs
+        # Dynamic frame mask selection:
+        types = {t.mask_type for t in self._templates}
+        if types == {"green"}:
+            self._frame_mask = hue_mask
+        elif types == {"couple"}:
+            self._frame_mask = couple_plate_mask
+        else:
+            self._frame_mask = lambda bgr: hue_mask(bgr) | couple_plate_mask(bgr)
 
     # ------------------------------------------------------------------ public
     def locate(self, frame_bgr: np.ndarray, origin: Tuple[int, int] = (0, 0),
@@ -122,7 +148,7 @@ class PlateLocator:
             wx0, wy0 = inter.x - ox, inter.y - oy
             wx1, wy1 = wx0 + inter.w, wy0 + inter.h
         crop = frame_bgr[wy0:wy1, wx0:wx1]
-        mask = hue_mask(crop)
+        mask = self._frame_mask(crop)
 
         # blank the chat log (zone defined on the FULL frame)
         cx0, cy0, cx1, cy1 = CHAT_ZONE

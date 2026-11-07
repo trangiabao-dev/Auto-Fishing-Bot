@@ -9,6 +9,8 @@ import os
 from dataclasses import asdict, dataclass
 from typing import Dict, List, Optional
 
+from core.path_utils import get_farm_config_path
+
 
 @dataclass
 class FruitRule:
@@ -33,8 +35,7 @@ class FruitRule:
 class FarmConfigManager:
     def __init__(self, config_path: Optional[str] = None):
         if config_path is None:
-            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            config_path = os.path.join(base_dir, "config", "farm_config.json")
+            config_path = get_farm_config_path()
 
         self.config_path = os.path.abspath(config_path)
         os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
